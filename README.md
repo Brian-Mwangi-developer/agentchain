@@ -56,7 +56,7 @@ import Anthropic from '@anthropic-ai/sdk';
 const chain = await AgentsChain.create({
   agentName: 'classifier',
   hostname: 'my-app',
-  capabilities: ['messages.create'],
+  capabilities: ['message'],
 });
 
 const ai = chain.anthropic(new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }));
@@ -114,6 +114,36 @@ Each `AuditEntry` contains:
 | `result` | `"success" \| "denied" \| "error"` | Outcome |
 | `timestamp` | `number` | Unix ms |
 | `meta` | `Record<string, unknown>` | Provider-specific metadata |
+
+---
+
+## Capability names
+
+`agents-chain` maps SDK method paths to short capability strings. You must use these exact strings in the `capabilities` array when calling `AgentsChain.create()` — otherwise the call will be blocked with a `ChainAuthError`.
+
+### OpenAI
+
+| SDK method | Capability string |
+|---|---|
+| `ai.chat.completions.create()` | `"chat.completion"` |
+| `ai.embeddings.create()` | `"embedding"` |
+| `ai.images.generate()` | `"image.generation"` |
+| `ai.audio.transcriptions.create()` | `"audio.transcription"` |
+| `ai.audio.speech.create()` | `"audio.speech"` |
+| `ai.moderations.create()` | `"moderation"` |
+| `ai.responses.create()` | `"response"` |
+
+### Anthropic
+
+| SDK method | Capability string |
+|---|---|
+| `ai.messages.create()` | `"message"` |
+| `ai.messages.stream()` | `"message.stream"` |
+| `ai.messages.countTokens()` | `"message.count_tokens"` |
+| `ai.completions.create()` | `"completion"` |
+| `ai.beta.messages.create()` | `"message.beta"` |
+
+Any SDK method not in these tables passes through without interception.
 
 ---
 

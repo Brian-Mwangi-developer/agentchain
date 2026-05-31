@@ -1,6 +1,6 @@
 {
   "name": "agents-chain",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Lightweight identity, auth, and audit layer for AI agent SDKs (OpenAI, Anthropic)",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
