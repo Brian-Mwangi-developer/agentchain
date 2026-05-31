@@ -1,7 +1,7 @@
 {
-  "name": "agentchain",
-  "version": "1.0.0",
-  "description": "",
+  "name": "agents-chain",
+  "version": "0.1.0",
+  "description": "Lightweight identity, auth, and audit layer for AI agent SDKs (OpenAI, Anthropic)",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -11,19 +11,43 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "prepublishOnly": "pnpm run build",
     "lint": "prettier --check .",
     "format": "prettier --write .",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "ai",
+    "agents",
+    "openai",
+    "anthropic",
+    "auth",
+    "jwt",
+    "audit",
+    "identity",
+    "llm"
+  ],
+  "author": "Brian Mwangi (https://github.com/Brian-Mwangi-developer)",
+  "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Brian-Mwangi-developer/agentchain.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Brian-Mwangi-developer/agentchain/issues"
+  },
+  "homepage": "https://github.com/Brian-Mwangi-developer/agentchain#readme",
   "devDependencies": {
     "@types/node": "^25.9.1",
     "prettier": "^3.8.3",
