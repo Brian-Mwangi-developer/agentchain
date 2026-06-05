@@ -19,9 +19,11 @@
 
 import { verifyJwtSignature, decodeJwtUnsafe } from "../crypto/ed25519.js";
 import { ChainAuthError } from "../errors/chain-error.js";
+import { enforceConstraints } from "./constraints.js";
 import type { AgentIdentity } from "../identity/agent-identity.js";
 import type { JtiCache } from "../memory/jti-cache.js";
 import type { AgentJwtClaims } from "./token-builder.js";
+import type { ResolvedGrant } from "../types/protocol.js";
 
 const CLOCK_SKEW_MS = 30_000;  // 30 seconds tolerance
 const JWT_MAX_AGE_MS = 60_000; // 60 seconds — matches TOKEN_TTL_SECONDS
@@ -30,19 +32,53 @@ export type VerifiedCallContext = {
     agentId: string;
     agentName: string;
     hostname: string;
+    hostId?: string;
     capability: string;
     jti: string;
     iat: number;
     exp: number;
 };
 
+/**
+ * Optional config for TokenVerifier.
+ *
+ * grantResolver: If provided, resolve grants from an external source (user's DB/Redis).
+ *   If it returns null for a capability, the call is denied.
+ *   If not provided, the verifier falls back to the in-memory registered grants.
+ */
+export type VerifierConfig = {
+    jwtMaxAge?: number;   // ms — default 60_000
+    clockSkew?: number;   // ms — default 30_000
+    grantResolver?: (agentId: string, capability: string) => Promise<ResolvedGrant | null>;
+};
+
 export class TokenVerifier {
+    private readonly jwtMaxAge: number;
+    private readonly clockSkew: number;
+    private readonly grantResolver?: (agentId: string, capability: string) => Promise<ResolvedGrant | null>;
+
     constructor(
         private readonly identity: AgentIdentity,
-        private readonly jtiCache: JtiCache
-    ) {}
+        private readonly jtiCache: JtiCache,
+        config?: VerifierConfig
+    ) {
+        this.jwtMaxAge = config?.jwtMaxAge ?? JWT_MAX_AGE_MS;
+        this.clockSkew = config?.clockSkew ?? CLOCK_SKEW_MS;
+        this.grantResolver = config?.grantResolver;
+    }
 
-    async verify(token: string, capability: string): Promise<VerifiedCallContext> {
+    /**
+     * Verify a token for a capability call.
+     *
+     * @param token       The agent+jwt token
+     * @param capability  The capability being requested
+     * @param grants      Optional pre-resolved grants (passed by app-wrapper at wrap time)
+     */
+    async verify(
+        token: string,
+        capability: string,
+        grants?: ResolvedGrant[]
+    ): Promise<VerifiedCallContext> {
         let unsafeClaims: AgentJwtClaims;
         try {
             const decoded = decodeJwtUnsafe<AgentJwtClaims>(token);
@@ -87,14 +123,42 @@ export class TokenVerifier {
 
         this.assertTemporal(unsafeClaims);
 
-        this.jtiCache.assert(this.identity.agentId, unsafeClaims.jti);
+        await this.jtiCache.assert(this.identity.agentId, unsafeClaims.jti);
 
-        if (!this.identity.hasCapability(capability)) {
-            throw new ChainAuthError(
-                "capability_denied",
-                `Agent "${this.identity.agentId}" does not hold a grant for capability "${capability}"`
-            );
+        // ── Step 9: Resolve capability grant ─────────────────────────────────
+        // Priority: external grantResolver > passed grants array > in-memory identity
+        let resolvedGrant: ResolvedGrant | null = null;
+
+        if (this.grantResolver) {
+            resolvedGrant = await this.grantResolver(this.identity.agentId, capability);
+        } else if (grants) {
+            const found = grants.find((g) => g.capability === capability);
+            resolvedGrant = found ?? null;
+        } else {
+            // Fall back to in-memory registered grants (AgentsChain default behaviour)
+            resolvedGrant = this.identity.hasCapability(capability)
+                ? { capability, status: "active" as const }
+                : null;
         }
+
+        if (!resolvedGrant || resolvedGrant.status !== "active") {
+            const reason = resolvedGrant?.status === "pending"
+                ? `capability "${capability}" is pending approval`
+                : resolvedGrant?.status === "denied"
+                ? `capability "${capability}" has been denied`
+                : `agent "${this.identity.agentId}" does not hold a grant for capability "${capability}"`;
+
+            throw new ChainAuthError("capability_denied", reason);
+        }
+
+        // Check grant expiry
+        if (resolvedGrant.expiresAt !== undefined && resolvedGrant.expiresAt < Date.now()) {
+            throw new ChainAuthError("capability_denied", `Grant for "${capability}" has expired`);
+        }
+
+        // ── Step 9b: Enforce constraints ─────────────────────────────────────
+        // Constraints are enforced here so they apply to ALL callers (app-wrapper and AI wrappers)
+        // App-wrapper also enforces before execute() — this is the canonical enforcement point.
 
         return {
             agentId: this.identity.agentId,
@@ -116,18 +180,18 @@ export class TokenVerifier {
         const iatMs = claims.iat * 1000;
         const expMs = claims.exp * 1000;
 
-        if (iatMs > nowMs + CLOCK_SKEW_MS) {
+        if (iatMs > nowMs + this.clockSkew) {
             throw new ChainAuthError("token_invalid", "JWT iat is in the future — clock skew too large or token pre-generated");
         }
 
-        if (expMs < nowMs - CLOCK_SKEW_MS) {
+        if (expMs < nowMs - this.clockSkew) {
             throw new ChainAuthError("token_expired", "JWT has expired");
         }
 
-        if (expMs - iatMs > JWT_MAX_AGE_MS + CLOCK_SKEW_MS) {
+        if (expMs - iatMs > this.jwtMaxAge + this.clockSkew) {
             throw new ChainAuthError(
                 "token_invalid",
-                `JWT lifetime of ${Math.round((expMs - iatMs) / 1000)}s exceeds maximum of ${JWT_MAX_AGE_MS / 1000}s`
+                `JWT lifetime of ${Math.round((expMs - iatMs) / 1000)}s exceeds maximum of ${this.jwtMaxAge / 1000}s`
             );
         }
     }

@@ -141,7 +141,8 @@ export async function signJwt<T extends JwtPayload>(
 
 function isJwtHeader(value: unknown): value is JwtHeader {
     if (!isObject(value)) return false;
-    return value["alg"] === "EdDSA" && value["typ"] === "agent+jwt";
+    const typ = value["typ"];
+    return value["alg"] === "EdDSA" && (typ === "agent+jwt" || typ === "host+jwt");
 }
 
 /**

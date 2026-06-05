@@ -12,6 +12,7 @@ import { generateId } from "../crypto/utils.js";
 import type { EncryptedStore } from "../memory/encrypted-store.js";
 import type { AuditEntry, AuditResult } from "../types/audit.js";
 import type { VerifiedCallContext } from "../auth/token-verifier.js";
+import type { AuditExporter } from "./audit-exporter.js";
 
 const STORE_KEY_LOG = "audit:log";
 
@@ -91,6 +92,26 @@ export class AuditLog {
 
     get count(): number {
         return this.getAll().length;
+    }
+
+    /**
+     * Export all entries via the provided exporter, then clear the in-memory log.
+     *
+     * Call this periodically or on process shutdown to push entries to a
+     * persistent destination (database, HTTP endpoint, log aggregator, etc.).
+     *
+     * If no exporter is provided, the log is simply cleared without exporting.
+     */
+    async drain(exporter?: AuditExporter): Promise<void> {
+        const entries = this.getAll();
+        if (entries.length === 0) return;
+
+        if (exporter) {
+            await exporter.export(entries);
+        }
+
+        // Clear the log after export
+        this.store.set(STORE_KEY_LOG, [] as AuditEntry[]);
     }
 }
 

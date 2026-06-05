@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-export type JwtTyp = "agent+jwt";
+export type JwtTyp = "agent+jwt" | "host+jwt";
 
 export function base64UrlEncode(buffer: Buffer | Uint8Array): string {
     return Buffer.from(buffer)
