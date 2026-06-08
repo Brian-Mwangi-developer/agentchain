@@ -17,13 +17,12 @@
  * (or different key) from being presented against this identity.
  */
 
-import { verifyJwtSignature, decodeJwtUnsafe } from "../crypto/ed25519.js";
+import { decodeJwtUnsafe, verifyJwtSignature } from "../crypto/ed25519.js";
 import { ChainAuthError } from "../errors/chain-error.js";
-import { enforceConstraints } from "./constraints.js";
 import type { AgentIdentity } from "../identity/agent-identity.js";
 import type { JtiCache } from "../memory/jti-cache.js";
-import type { AgentJwtClaims } from "./token-builder.js";
 import type { ResolvedGrant } from "../types/protocol.js";
+import type { AgentJwtClaims } from "./token-builder.js";
 
 const CLOCK_SKEW_MS = 30_000;  // 30 seconds tolerance
 const JWT_MAX_AGE_MS = 60_000; // 60 seconds — matches TOKEN_TTL_SECONDS
@@ -51,6 +50,7 @@ export type VerifierConfig = {
     clockSkew?: number;   // ms — default 30_000
     grantResolver?: (agentId: string, capability: string) => Promise<ResolvedGrant | null>;
 };
+//NOTE:ResolvedGrant We can also have Resolved Grants
 
 export class TokenVerifier {
     private readonly jwtMaxAge: number;

@@ -47,7 +47,7 @@ export class AgentIdentity {
             capability: cap,
             grantedAt: Date.now(),
         }));
-
+        // Registered Agent needs to be having Host details
         const registration: RegisteredAgent = {
             agentId,
             agentName: config.agentName,

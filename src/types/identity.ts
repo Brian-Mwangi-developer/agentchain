@@ -34,7 +34,7 @@ export type ConstraintOperator = {
 };
 
 export type ConstraintValue = ConstraintPrimitive | ConstraintOperator;
-
+// NOTE: a Registered Agent needs its parents HostKeys
 export type RegisteredAgent = {
     agentId: string;       
     agentName: string;

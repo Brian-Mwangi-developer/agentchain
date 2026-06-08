@@ -15,7 +15,7 @@ import { randomBytes } from "node:crypto";
 import { signJwt } from "../crypto/ed25519.js";
 import { base64UrlEncode } from "../crypto/utils.js";
 import type { AgentIdentity } from "../identity/agent-identity.js";
-
+//NOTE:Confirm this Agent Issuing.
 export type AgentJwtClaims = {
     iss: string;
     sub: string;

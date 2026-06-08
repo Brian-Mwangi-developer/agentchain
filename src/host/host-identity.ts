@@ -34,7 +34,7 @@ export type HostConfig = {
     issuerUrl: string;       // The agent-auth server this Host authenticates against
     encryptionKey?: string;  // Optional AES-256-GCM key for EncryptedStore
 };
-
+//NOTE COnfirm this Identity Correctness
 export type HostRegistration = {
     hostId: string;          // JWK thumbprint
     name: string;

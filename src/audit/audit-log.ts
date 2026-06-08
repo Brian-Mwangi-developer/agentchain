@@ -27,7 +27,7 @@ export type RecordDeniedOptions = {
 };
 
 export type RecordCallOptions = {
-    context: VerifiedCallContext;
+    context: VerifiedCallContext; //NOTE: This is  not complete 
     args: Record<string, unknown>;
     result: Exclude<AuditResult, "denied">;
     durationMs: number;
@@ -52,6 +52,7 @@ export class AuditLog {
             timestamp: Date.now(),
             durationMs: 0,
         };
+        //NOTE:Fix this since it does not Contain Hosts credentials
         this.store.append<AuditEntry>(STORE_KEY_LOG, entry);
         return entry;
     }
@@ -74,6 +75,7 @@ export class AuditLog {
         this.store.append<AuditEntry>(STORE_KEY_LOG, entry);
         return entry;
     }
+    //NOTE:Fix this also it contains wrong Agent Identity
 
     /** Return all decrypted audit entries for this session. */
     getAll(): AuditEntry[] {
