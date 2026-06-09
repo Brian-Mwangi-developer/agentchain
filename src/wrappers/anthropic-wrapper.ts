@@ -1,17 +1,4 @@
-/**
- * Anthropic SDK wrapper — intercepts calls and runs the auth + audit pipeline.
- *
- * Intercepted capability names (mapped from SDK method paths):
- *   client.messages.create       → "message"
- *   client.messages.stream       → "message.stream"
- *   client.messages.countTokens  → "message.count_tokens"
- *   client.completions.create    → "completion"  (legacy)
- *   client.beta.messages.create  → "message.beta"
- *
- * Any other method path passes through without interception.
- *
- * Same Proxy approach as the OpenAI wrapper — no SDK monkey-patching.
- */
+/** Anthropic SDK Proxy wrapper. Intercepts known method paths and gates them through auth + audit. */
 
 import { ChainAuthError } from "../errors/chain-error.js";
 import type { TokenBuilder } from "../auth/token-builder.js";
@@ -34,10 +21,6 @@ type InterceptContext = {
     log: AuditLog;
 };
 
-/**
- * Wrap an Anthropic client instance.
- * Returns a Proxy that enforces agent auth on every intercepted method.
- */
 export function wrapAnthropic<T extends object>(client: T, ctx: InterceptContext): T {
     return buildProxy(client, ctx, []);
 }

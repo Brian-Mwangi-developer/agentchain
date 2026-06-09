@@ -1,15 +1,8 @@
-/**
- * Ed25519 key operations and JWT construction using only node:crypto.
- *
- * - Zero external JWT library dependency
- * - All signing uses EdDSA (Ed25519) via crypto.subtle
- * - Never pass Buffer directly to crypto.subtle — always Uint8Array
- */
+/** Ed25519 key operations and JWT construction using only node:crypto. */
 
 import { createHash } from "node:crypto";
 import { base64UrlDecode, base64UrlEncode, isObject, parseJson, type JwtTyp } from "./utils.js";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
 
 export type JwtHeader = {
     alg: "EdDSA";
@@ -42,7 +35,6 @@ export type JwksResponse = {
     keys: JsonWebKey[];
 };
 
-// ─── Key Generation ───────────────────────────────────────────────────────────
 
 export async function generateKeyPair(): Promise<{
     publicKey: CryptoKey;
@@ -56,7 +48,6 @@ export async function generateKeyPair(): Promise<{
     return { publicKey: keypair.publicKey, privateKey: keypair.privateKey };
 }
 
-// ─── JWK Export / Import ──────────────────────────────────────────────────────
 
 export async function exportPublicKeyJwk(key: CryptoKey): Promise<JsonWebKey> {
     return crypto.subtle.exportKey("jwk", key);
@@ -92,12 +83,6 @@ export async function importPrivateKeyJwk(jwk: JsonWebKey): Promise<CryptoKey> {
     );
 }
 
-// ─── JWK Thumbprint (RFC 7638) ────────────────────────────────────────────────
-
-/**
- * Compute the SHA-256 JWK thumbprint of an Ed25519 public key.
- * Canonical JSON: only crv, kty, x — sorted lexicographically.
- */
 export function computeJwkThumbprint(jwk: JsonWebKey): string {
     if (jwk.kty !== "OKP" || jwk.crv !== "Ed25519" || !jwk.x) {
         throw new Error("Invalid Ed25519 JWK for thumbprint computation");
@@ -107,16 +92,11 @@ export function computeJwkThumbprint(jwk: JsonWebKey): string {
     return base64UrlEncode(hash);
 }
 
-// ─── JWT Construction ─────────────────────────────────────────────────────────
 
 function encodeJwtPart(obj: object): string {
     return base64UrlEncode(Buffer.from(JSON.stringify(obj)));
 }
 
-/**
- * Sign a compact JWT using Ed25519.
- * The private key signs header.payload — signature covers both parts.
- */
 export async function signJwt<T extends JwtPayload>(
     payload: T,
     privateKey: CryptoKey,
@@ -130,14 +110,13 @@ export async function signJwt<T extends JwtPayload>(
     const sigBytes = await crypto.subtle.sign(
         "Ed25519" as AlgorithmIdentifier,
         privateKey,
-        new TextEncoder().encode(signingInput) // Uint8Array — NOT Buffer
+        new TextEncoder().encode(signingInput)
     );
 
     const sig = base64UrlEncode(new Uint8Array(sigBytes));
     return `${signingInput}.${sig}`;
 }
 
-// ─── JWT Decoding (without verification) ─────────────────────────────────────
 
 function isJwtHeader(value: unknown): value is JwtHeader {
     if (!isObject(value)) return false;
@@ -145,10 +124,6 @@ function isJwtHeader(value: unknown): value is JwtHeader {
     return value["alg"] === "EdDSA" && (typ === "agent+jwt" || typ === "host+jwt");
 }
 
-/**
- * Decode a JWT without verifying its signature.
- * Used to extract claims before key lookup. Never trust these claims for auth.
- */
 export function decodeJwtUnsafe<T extends JwtPayload = JwtPayload>(
     token: string
 ): DecodedJwt<T> {
@@ -177,12 +152,6 @@ export function decodeJwtUnsafe<T extends JwtPayload = JwtPayload>(
     };
 }
 
-// ─── JWT Verification ─────────────────────────────────────────────────────────
-
-/**
- * Verify an Ed25519 JWT signature and confirm typ matches.
- * Does NOT check exp/iat/jti — TokenVerifier handles those.
- */
 export async function verifyJwtSignature<T extends JwtPayload = JwtPayload>(
     token: string,
     publicKey: CryptoKey,
@@ -204,7 +173,7 @@ export async function verifyJwtSignature<T extends JwtPayload = JwtPayload>(
         "Ed25519" as AlgorithmIdentifier,
         publicKey,
         sigBytes,
-        inputBytes // Uint8Array — NOT Buffer
+        inputBytes
     );
 
     if (!valid) {

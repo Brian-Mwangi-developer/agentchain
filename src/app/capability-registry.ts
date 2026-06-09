@@ -1,10 +1,4 @@
-/**
- * CapabilityRegistry — registers Capability objects and generates well-known config.
- *
- * When building an AppChain, you register all capabilities the app exposes.
- * The registry is then used by the app-wrapper Proxy to gate calls and by
- * well-known.ts to generate the discovery config.
- */
+/** Maps capability names to Capability objects and builds well-known discovery config. */
 
 import type { Capability } from "../types/capabilities.js";
 import type { AgentConfiguration } from "../types/protocol.js";
@@ -12,10 +6,6 @@ import type { AgentConfiguration } from "../types/protocol.js";
 export class CapabilityRegistry {
     private readonly caps = new Map<string, Capability>();
 
-    /**
-     * Register a capability. Chainable.
-     * Throws if a capability with the same name is already registered.
-     */
     register<TIn, TOut>(cap: Capability<TIn, TOut>): this {
         if (this.caps.has(cap.name)) {
             throw new Error(`CapabilityRegistry: capability "${cap.name}" is already registered`);
@@ -40,18 +30,6 @@ export class CapabilityRegistry {
         return this.caps.size;
     }
 
-    /**
-     * Build an AgentConfiguration object suitable for serving at
-     * GET /.well-known/agent-configuration.
-     *
-     * Endpoint paths match the agent-auth protocol spec (1.0-draft).
-     * Consumers are responsible for implementing these routes in their server.
-     *
-     * @param issuer         The base URL of the server (e.g. "https://billing.mycompany.com")
-     * @param providerName   Short name for the app (e.g. "billing-service")
-     * @param endpointPrefix Optional prefix for endpoint paths (default: "")
-     * @param opts           Optional fields: description, jwks_uri
-     */
     buildWellKnownConfig(
         issuer: string,
         providerName: string,

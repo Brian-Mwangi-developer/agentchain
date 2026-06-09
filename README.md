@@ -1,6 +1,6 @@
 # agents-chain
 
-**v0.0.3** — A zero-dependency security layer that wraps any app, service object, or AI SDK with Ed25519 identity, JWT-gated capability enforcement, constraint validation, and an encrypted audit trail.
+**v0.0.4** — A zero-dependency security layer that wraps any app, service object, or AI SDK with Ed25519 identity, JWT-gated capability enforcement, constraint validation, and an encrypted audit trail.
 
 Drop it in front of your billing service, a third-party API client, or an OpenAI/Anthropic SDK — every call is signed, verified, scoped, and logged without touching your existing code.
 
@@ -9,7 +9,7 @@ Drop it in front of your billing service, a third-party API client, or an OpenAI
 ## What it does
 
 - **Host + Agent identity** — Ed25519 keypairs with JWK thumbprints as stable IDs. Hosts sign agent registration JWTs; agents sign scoped capability tokens.
-- **9-step JWT verification** — Every capability call mints a fresh 60-second single-use token. Sub, iss, aud, signature, expiry, and JTI replay are all verified before the call proceeds.
+- **11-step JWT verification** — Every capability call mints a fresh 60-second single-use token. Sub, iss, aud, Host delegation chain, signature, expiry, JTI replay, and capability grant are all verified before the call proceeds.
 - **Capability registry + app wrapper** — Register named capabilities on any service object. A JavaScript Proxy intercepts method calls by name and gates them through the full auth pipeline.
 - **Constraint enforcement** — Grants can carry `max`, `min`, `in`, `not_in`, or exact-equality constraints on call arguments, enforced before execution.
 - **Encrypted audit log** — AES-256-GCM in-memory log of every call (success, denied, error). Drain to any HTTP endpoint or custom exporter on a schedule or at shutdown.
@@ -23,7 +23,7 @@ Drop it in front of your billing service, a third-party API client, or an OpenAI
 
 ![Package overview — all modules and how they connect](https://raw.githubusercontent.com/Brian-Mwangi-developer/agentchain/main/docs/overview1.jpeg)
 
-The package has six layers. **HostIdentity** and **AgentIdentity** hold Ed25519 keypairs. **TokenBuilder** mints scoped JWTs; **TokenVerifier** runs the 9-step verification pipeline. **CapabilityRegistry** maps method names to capability definitions; **wrapApp()** turns any object into a secured Proxy using that registry. **AuditLog** records every call into an AES-256-GCM encrypted store and can drain to any **AuditExporter**. All state lives in **EncryptedStore** — there is no network I/O by default.
+The package has six layers. **HostIdentity** and **AgentIdentity** hold Ed25519 keypairs — agents are cryptographically linked to their Host so no rogue agent can impersonate a registered one. **TokenBuilder** mints scoped JWTs; **TokenVerifier** runs the 11-step verification pipeline including delegation chain checks. **CapabilityRegistry** maps method names to capability definitions; **wrapApp()** turns any object into a secured Proxy using that registry. **AuditLog** records every call (with auth overhead timing) into an AES-256-GCM encrypted store, capped at 1000 entries, and drains to any **AuditExporter**. All state lives in one shared **EncryptedStore** — there is no network I/O by default.
 
 ---
 
@@ -110,11 +110,13 @@ Every intercepted call goes through this verification pipeline before your code 
 | 3 | `sub` matches registered `agentId` | `agent_not_found` |
 | 4 | `iss` matches registered public key thumbprint | `token_invalid` |
 | 5 | `aud` matches the requested capability name | `capability_denied` |
-| 6 | Ed25519 signature is valid | `token_invalid` |
-| 7 | `exp`/`iat` temporal check + 30s clock skew tolerance | `token_expired` / `token_invalid` |
-| 8 | JTI not seen in 90-second replay window | `token_replayed` |
-| 9 | Agent holds an `active` grant for the capability | `capability_denied` |
-| 9b | Call arguments satisfy all grant constraints | `constraint_violated` |
+| 6 | `hostThumbprint` claim matches the agent's registered Host | `token_invalid` |
+| 7 | Ed25519 signature is valid | `token_invalid` |
+| 8 | `exp`/`iat` temporal check + 30s clock skew tolerance | `token_expired` / `token_invalid` |
+| 9 | JTI not seen in 90-second replay window | `token_replayed` |
+| 10 | Agent holds an `active` grant for the capability | `capability_denied` |
+| 11 | Grant has not expired (`expiresAt`) | `capability_denied` |
+| 11b | Call arguments satisfy all grant constraints | `constraint_violated` |
 
 All failures throw `ChainAuthError` and are recorded in the audit log as `result: "denied"`.
 
@@ -287,15 +289,15 @@ Argument keys matching `key`, `secret`, `token`, `password`, `auth`, `credential
 
 ```ts
 // chain.host is a HostIdentity instance
-const hostJwt = await chain.host.signJwt();
+const hostJwt = await chain.host.signHostJwt();
 const registrationJwt = await chain.host.signAgentRegistrationJwt(agentPublicKeyJwk);
 
 // Stable identity across restarts — export and reload the private key
 const privateKeyJwk = await chain.host.exportPrivateKeyJwk();
 // persist privateKeyJwk securely
 
-// On next startup:
-const host = await HostIdentity.fromKeyPair(savedPrivateKeyJwk, savedPublicKeyJwk, config);
+// On next startup (pass the shared store from your chain):
+const host = await HostIdentity.fromKeyPair(savedPrivateKeyJwk, savedPublicKeyJwk, config, store);
 ```
 
 ---
@@ -347,6 +349,50 @@ import {
   base64UrlDecode,
 } from 'agents-chain';
 ```
+
+---
+
+## Auth latency overhead
+
+The package exposes per-call auth overhead via `getStats()`:
+
+```ts
+const stats = chain.getStats();
+// stats.authOverhead → { avgMs: number, maxMs: number }
+```
+
+`authOverheadMs` is the time spent inside `TokenBuilder.build()` + `TokenVerifier.verify()` for each call. In-process Ed25519 signing is fast — typical warm-path overhead is **< 1ms** per call on modern hardware.
+
+---
+
+## Changelog
+
+### v0.0.4
+
+**Security:**
+- **Host → Agent delegation chain** — Every agent registration now embeds `hostThumbprint` + `hostPublicKeyJwk`. Every token carries `hostThumbprint`. Verifier step 6 checks that the token's `hostThumbprint` matches the agent's registered Host. This closes the rogue-agent gap where a self-issued agent was indistinguishable from a registered one.
+- **11-step verification pipeline** — Added step 6 (delegation chain check), step 11 (grant expiry), rounding out the pipeline to 11 checks.
+
+**Memory management:**
+- **JTI cache background GC** — In-memory JTI replay protection now runs a background `setInterval` (45s interval, unref'd) that evicts expired entries proactively. Previously only lazy-evicted on insert — a burst of traffic followed by silence could leave ~90,000 entries in memory with no cleanup trigger.
+- **`JtiCache.destroy()`** — New method to stop the GC timer and clear the cache. Call on graceful shutdown or in tests to avoid timer leaks.
+- **Audit log capped at 1000 entries** — `appendCapped()` evicts the oldest entry when the cap is reached. Prevents unbounded memory growth in long-running processes.
+
+**Observability:**
+- `authOverheadMs` recorded per audit entry — the time spent in `build()+verify()` for every call.
+- `getStats()` returns `authOverhead: { avgMs, maxMs }` across all entries.
+
+**Architecture:**
+- `HostIdentity` now uses the **shared** `EncryptedStore` passed in from the chain. Previously it silently created its own isolated store, siloing host data from the audit log.
+- `AgentsChain` gains a `drain()` method (previously only `AppChain` had it).
+- Duplicate type definitions (`AgentJwtClaims`, constraint types) consolidated to single canonical locations.
+
+**Tests:**
+- 64 tests covering all modules via Node.js built-in `node:test` (no new dependencies). Run with `pnpm test`.
+
+### v0.0.3
+
+Initial public release with `AgentsChain`, `AppChain`, `HostIdentity`, `AgentIdentity`, `TokenBuilder`, `TokenVerifier`, `AuditLog`, `CapabilityRegistry`, and `EncryptedStore`.
 
 ---
 

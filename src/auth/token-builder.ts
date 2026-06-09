@@ -1,18 +1,4 @@
-/**
- * TokenBuilder — creates signed agent+jwt tokens per capability call.
- *
- * Security design:
- * - Every token is single-use: a fresh cryptographically random jti per call.
- * - TTL is 60 seconds — minimal viable window for a synchronous SDK call.
- * - iss = agent's own JWK thumbprint — ties the token to this specific keypair.
- * - sub = agentId (<hostname>-agent-<32hex>) — stable agent identifier.
- * - aud = capability name — a token for "chat.completion" cannot authorize
- *   "embedding". Scope-bound tokens prevent capability escalation.
- * - hostThumbprint = the Host that registered this agent, embedded in every
- *   token. Verifiers can confirm the agent has a legitimate parent host
- *   without needing an external registry call. This closes the gap where
- *   a rogue self-issued agent was indistinguishable from a registered one.
- */
+/** Mints single-use Ed25519-signed agent+jwt tokens scoped to one capability. */
 
 import { randomBytes } from "node:crypto";
 import { signJwt } from "../crypto/ed25519.js";

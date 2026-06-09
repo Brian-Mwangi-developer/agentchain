@@ -1,6 +1,6 @@
 {
   "name": "agents-chain",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Lightweight identity, auth, and audit layer for AI agent SDKs (OpenAI, Anthropic)",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -21,7 +21,7 @@
     "prepublishOnly": "pnpm run build",
     "lint": "prettier --check .",
     "format": "prettier --write .",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "tsc && node --test dist/__tests__/agents-chain.test.js"
   },
   "keywords": [
     "ai",

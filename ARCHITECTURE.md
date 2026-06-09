@@ -17,10 +17,10 @@ graph TB
         end
 
         subgraph Auth["Auth Layer"]
-            TB2["TokenBuilder\nMints scoped agent+jwt\n(60s TTL, single-use JTI)"]
-            TV["TokenVerifier\n9-step JWT verification\n+ constraint enforcement"]
+            TB2["TokenBuilder\nMints scoped agent+jwt\n(60s TTL, single-use JTI\nhostThumbprint embedded)"]
+            TV["TokenVerifier\n11-step JWT verification\n+ constraint enforcement"]
             CS["enforceConstraints()\nmax / min / in / not_in\nexact equality"]
-            JC["JtiCache\nReplay protection\n90-second window"]
+            JC["JtiCache\nReplay protection\n90-second window\nBackground GC timer (45s)"]
         end
 
         subgraph AppLayer["App Layer"]
@@ -33,7 +33,7 @@ graph TB
         end
 
         subgraph Audit["Audit Layer"]
-            AL["AuditLog\nAppend-only encrypted log\nrecordCall / recordDenied"]
+            AL["AuditLog\nAppend-only encrypted log\nCapped at 1000 entries\nrecords authOverheadMs"]
             AE["AuditExporter\nConsoleAuditExporter\nHttpAuditExporter"]
         end
 
@@ -107,23 +107,24 @@ sequenceDiagram
 
 ## Per-Call Security Flow
 
-Every intercepted capability call goes through this 9-step verification pipeline.
+Every intercepted capability call goes through this 11-step verification pipeline.
 
 ```mermaid
 flowchart TD
     CALL["secured.createInvoice(args)"]
-    BUILD["TokenBuilder.build('createInvoice')\nMint scoped agent+jwt\n{ iss: thumbprint, sub: agentId,\n  aud: 'createInvoice',\n  iat, exp: now+60, jti: random }"]
+    BUILD["TokenBuilder.build('createInvoice')\nMint scoped agent+jwt\n{ iss: thumbprint, sub: agentId,\n  aud: 'createInvoice',\n  hostThumbprint: hostId,\n  iat, exp: now+60, jti: random }"]
     D1{{"Step 1-2\nDecode JWT header + payload\nConfirm typ = 'agent+jwt'"}}
     D2{{"Step 3\nsub === registered agentId?"}}
     D3{{"Step 4\niss === public key thumbprint?"}}
     D4{{"Step 5\naud === requested capability?"}}
-    D5{{"Step 6\nEd25519 signature valid?"}}
-    D6{{"Step 7\nexp/iat temporal check\n+ clock skew tolerance"}}
-    D7{{"Step 8\nJTI not seen in\n90-second window?"}}
-    D8{{"Step 9\nAgent holds active grant\nfor this capability?\n(grantResolver or in-memory)"}}
-    D9{{"Step 9b\nConstraints satisfied?\n(max/min/in/not_in)"}}
+    D5{{"Step 6 (NEW)\nhostThumbprint claim matches\nagent's registered Host?"}}
+    D6{{"Step 7\nEd25519 signature valid?"}}
+    D7{{"Step 8\nexp/iat temporal check\n+ clock skew tolerance"}}
+    D8{{"Step 9\nJTI not seen in\n90-second window?"}}
+    D9{{"Step 10\nAgent holds active grant\nfor this capability?\n(grantResolver or in-memory)"}}
+    D10{{"Step 11\nGrant not expired?\n+ Constraints satisfied?"}}
     EXEC["capability.execute(args, agentContext)\nUser-defined execution"]
-    LOG_OK["AuditLog.recordCall()\nresult: 'success'"]
+    LOG_OK["AuditLog.recordCall()\nresult: 'success'\nauthOverheadMs recorded"]
     LOG_ERR["AuditLog.recordCall()\nresult: 'error'"]
     LOG_DENY["AuditLog.recordDenied()\nresult: 'denied'"]
     THROW_AUTH["throw ChainAuthError"]
@@ -141,26 +142,66 @@ flowchart TD
     D4 -->|pass| D5
     D5 -->|fail: token_invalid| THROW_AUTH
     D5 -->|pass| D6
-    D6 -->|fail: token_expired / token_invalid| THROW_AUTH
+    D6 -->|fail: token_invalid| THROW_AUTH
     D6 -->|pass| D7
-    D7 -->|fail: token_replayed| THROW_AUTH
+    D7 -->|fail: token_expired / token_invalid| THROW_AUTH
     D7 -->|pass| D8
-    D8 -->|fail: capability_denied| THROW_AUTH
+    D8 -->|fail: token_replayed| THROW_AUTH
     D8 -->|pass| D9
-    D9 -->|fail: constraint_violated| THROW_AUTH
-    D9 -->|pass| EXEC
+    D9 -->|fail: capability_denied| THROW_AUTH
+    D9 -->|pass| D10
+    D10 -->|fail: capability_denied / constraint_violated| THROW_AUTH
+    D10 -->|pass| EXEC
     EXEC -->|success| LOG_OK
     EXEC -->|throws| LOG_ERR
     LOG_ERR --> THROW_EXEC
     THROW_AUTH --> LOG_DENY
 
     style CALL fill:#1e293b,color:#f8fafc
+    style D5 fill:#1e40af,color:#eff6ff
     style EXEC fill:#166534,color:#f0fdf4
     style LOG_OK fill:#166534,color:#f0fdf4
     style LOG_ERR fill:#7f1d1d,color:#fef2f2
     style LOG_DENY fill:#7f1d1d,color:#fef2f2
     style THROW_AUTH fill:#7f1d1d,color:#fef2f2
     style THROW_EXEC fill:#7f1d1d,color:#fef2f2
+```
+
+---
+
+## Host → Agent Delegation Chain
+
+Every agent is cryptographically linked to its Host. This closes the rogue-agent gap — a self-issued agent cannot impersonate a registered one because the verifier checks `hostThumbprint` at step 6.
+
+```mermaid
+flowchart LR
+    subgraph HostLayer["Host Layer"]
+        HI["HostIdentity\nEd25519 keypair\nhostId = JWK thumbprint"]
+    end
+
+    subgraph AgentLayer["Agent Layer"]
+        AI["AgentIdentity\nEd25519 keypair\nregistration embeds:\n- hostThumbprint\n- hostPublicKeyJwk"]
+    end
+
+    subgraph TokenLayer["Token Layer (per-call)"]
+        JWT["agent+jwt\nclaims include:\n- iss: agentThumbprint\n- sub: agentId\n- hostThumbprint: hostId"]
+    end
+
+    subgraph VerifyLayer["Verification (step 6)"]
+        CHECK["jwt.hostThumbprint\n===\nagentIdentity.hostThumbprint?"]
+    end
+
+    HI -->|"thumbprint + publicKeyJwk\nembedded at registration"| AI
+    AI -->|"hostThumbprint\nincluded in every token"| JWT
+    JWT -->|"checked by TokenVerifier"| CHECK
+    CHECK -->|"mismatch → token_invalid"| DENY["ChainAuthError\ntoken_invalid"]
+    CHECK -->|"match → proceed"| NEXT["Steps 7-11"]
+
+    style HI fill:#1e40af,color:#eff6ff
+    style AI fill:#1e40af,color:#eff6ff
+    style JWT fill:#1e293b,color:#f8fafc
+    style CHECK fill:#166534,color:#f0fdf4
+    style DENY fill:#7f1d1d,color:#fef2f2
 ```
 
 ---
@@ -253,7 +294,7 @@ graph TD
 
     subgraph Security["agents-chain Security Layer"]
         PROXY["JS Proxy Intercept"]
-        JWT_FLOW["9-Step JWT Verification"]
+        JWT_FLOW["11-Step JWT Verification"]
         CONSTRAINT["Constraint Enforcement"]
         AUDIT["Encrypted Audit Log"]
     end

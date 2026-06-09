@@ -1,22 +1,4 @@
-/**
- * wrapApp — wraps any object with capability-gated security.
- *
- * This is the generic version of the AI SDK wrappers (openai-wrapper, anthropic-wrapper).
- * Instead of a hardcoded path→capability map, it uses a CapabilityRegistry.
- *
- * For every method call on the wrapped object:
- *   1. Look up capability by method name in the registry
- *   2. If not in registry → call through without any gating (pass-through)
- *   3. If in registry:
- *      a. Verify the agent holds an active grant for this capability
- *      b. Enforce any constraints on the call arguments
- *      c. Call capability.execute(args, agentContext) — NOT the raw target method
- *      d. Record in audit log (success / denied / error)
- *
- * Note: The Proxy only intercepts direct method calls (not nested paths).
- * Use the AI SDK wrappers for nested path interception (e.g. client.chat.completions.create).
- * This wrapper is designed for flat service objects where method names are unique.
- */
+/** Proxy wrapper for arbitrary service objects. Registered methods are auth-gated via CapabilityRegistry. */
 
 import { ChainAuthError } from "../errors/chain-error.js";
 import { enforceConstraints } from "../auth/constraints.js";
@@ -36,14 +18,6 @@ export type AppInterceptContext = {
     grants: ResolvedGrant[];
 };
 
-/**
- * Wrap any object with capability-gated security.
- *
- * @param target    The object to wrap (e.g. a service instance)
- * @param registry  Capability registry — defines what methods are gated
- * @param ctx       Intercept context — identity, auth, audit, grants
- * @returns         A Proxy with the same type as target
- */
 export function wrapApp<T extends object>(
     target: T,
     registry: CapabilityRegistry,
@@ -56,7 +30,6 @@ export function wrapApp<T extends object>(
             const capability = registry.get(prop);
             const value = Reflect.get(obj, prop);
 
-            // Not a registered capability — pass through without gating
             if (capability === undefined || typeof value !== "function") {
                 return value;
             }
@@ -76,13 +49,11 @@ function createInterceptedMethod(
         let jti = "unknown";
         const authStart = Date.now();
         try {
-            // Build + verify a fresh single-use JWT
             const { token, claims } = await ctx.builder.build(capabilityName);
             jti = claims.jti;
             const verified = await ctx.verifier.verify(token, capabilityName, ctx.grants);
             const authOverheadMs = Date.now() - authStart;
 
-            // Enforce grant constraints against call arguments
             const grant = ctx.grants.find(
                 (g) => g.capability === capabilityName && g.status === "active"
             );
@@ -90,7 +61,6 @@ function createInterceptedMethod(
                 enforceConstraints(grant.constraints, callArgs);
             }
 
-            // Build agent context for capability.execute()
             const agentContext: AgentContext = {
                 agentId: verified.agentId,
                 hostId: verified.hostThumbprint,
@@ -99,7 +69,6 @@ function createInterceptedMethod(
                     .map((g) => g.capability),
             };
 
-            // Get the registered capability and execute it
             const registryEntry = getCapabilityFromCtx(capabilityName, ctx);
             if (!registryEntry) {
                 throw new ChainAuthError(

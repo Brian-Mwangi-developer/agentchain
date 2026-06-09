@@ -1,14 +1,4 @@
-/**
- * EncryptedStore — AES-256-GCM in-memory key-value store.
- *
- * Security properties:
- * - Every value is independently encrypted with a fresh random IV.
- * - The encryption key never leaves this module after init.
- * - Plaintext is never held in a variable after encryption/before decryption.
- * - Store is process-local; there is no persistence to disk.
- *
- * Format: "iv:authTag:ciphertext" (all base64, colon-separated)
- */
+/** AES-256-GCM in-memory key-value store. Each value encrypted with a fresh random IV. */
 
 import { randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
 
@@ -24,10 +14,7 @@ export class EncryptedStore {
         this.key = key;
     }
 
-    /**
-     * Create a new EncryptedStore.
-     * @param hexKey Optional 64-char hex string (32 bytes). Generated randomly if omitted.
-     */
+    /** @param hexKey Optional 64-char hex string (32 bytes). Random key generated if omitted. */
     static create(hexKey?: string): EncryptedStore {
         let key: Buffer;
         if (hexKey) {

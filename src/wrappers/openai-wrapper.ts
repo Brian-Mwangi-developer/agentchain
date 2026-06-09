@@ -1,20 +1,4 @@
-/**
- * OpenAI SDK wrapper — intercepts calls and runs the auth + audit pipeline.
- *
- * Intercepted capability names (mapped from SDK method paths):
- *   client.chat.completions.create  → "chat.completion"
- *   client.embeddings.create        → "embedding"
- *   client.images.generate          → "image.generation"
- *   client.audio.transcriptions.create → "audio.transcription"
- *   client.audio.speech.create      → "audio.speech"
- *   client.moderations.create       → "moderation"
- *   client.responses.create         → "response"  (Responses API)
- *
- * Any other method path passes through without interception.
- *
- * The wrapper uses JavaScript Proxy so it does not modify the original
- * client object and works with any OpenAI SDK version.
- */
+/** OpenAI SDK Proxy wrapper. Intercepts known method paths and gates them through auth + audit. */
 
 import { ChainAuthError } from "../errors/chain-error.js";
 import type { TokenBuilder } from "../auth/token-builder.js";
@@ -22,7 +6,6 @@ import type { TokenVerifier } from "../auth/token-verifier.js";
 import type { AuditLog } from "../audit/audit-log.js";
 import type { AgentIdentity } from "../identity/agent-identity.js";
 
-/** Map from SDK method path (dot-joined) to capability name */
 const METHOD_CAPABILITY_MAP: Record<string, string> = {
     "chat.completions.create": "chat.completion",
     "embeddings.create": "embedding",
@@ -40,10 +23,6 @@ type InterceptContext = {
     log: AuditLog;
 };
 
-/**
- * Wrap an OpenAI client instance.
- * Returns a Proxy that enforces agent auth on every intercepted method.
- */
 export function wrapOpenAI<T extends object>(client: T, ctx: InterceptContext): T {
     return buildProxy(client, ctx, []);
 }
@@ -63,12 +42,10 @@ function buildProxy<T extends object>(
 
             const value = Reflect.get(obj, prop);
 
-            // If this exact path maps to a known capability, intercept the function
             if (capability !== undefined && typeof value === "function") {
                 return createInterceptedMethod(value.bind(obj), capability, ctx);
             }
 
-            // If it's an object (namespace like client.chat), proxy it deeper
             if (typeof value === "object" && value !== null) {
                 return buildProxy(value as object, ctx, nextPath);
             }
@@ -89,7 +66,6 @@ function createInterceptedMethod(
         let jti = "unknown";
         const authStart = Date.now();
         try {
-            // Build + verify a fresh single-use token (authStart captures the overhead)
             const { token, claims } = await ctx.builder.build(capability);
             jti = claims.jti;
             const verified = await ctx.verifier.verify(token, capability);

@@ -1,21 +1,4 @@
-/**
- * TokenVerifier — verifies an agent+jwt token against the registered identity.
- *
- * Verification steps (must all pass before a capability call proceeds):
- *
- * 1.  Decode JWT header — confirm typ = "agent+jwt"
- * 2.  Decode payload — extract iss (agent thumbprint), sub (agentId), aud (capability)
- * 3.  Verify sub matches the registered agentId — no foreign agents
- * 4.  Verify iss matches the registered agent public key thumbprint — no key swap
- * 5.  Verify aud matches the requested capability — scope-bound token
- * 6.  Verify hostThumbprint claim matches the registered host — closes the gap
- *     where a rogue self-issued agent was indistinguishable from a registered one
- * 7.  Import the registered public key and verify the Ed25519 signature
- * 8.  Check exp / iat temporal claims + clock skew
- * 9.  Check jti uniqueness (replay protection) via JtiCache
- * 10. Verify the agent holds an active grant for the capability
- * 11. Check grant expiry
- */
+/** 11-step JWT verification: identity, delegation chain, signature, expiry, replay, and grants. */
 
 import { decodeJwtUnsafe, verifyJwtSignature } from "../crypto/ed25519.js";
 import { ChainAuthError } from "../errors/chain-error.js";
@@ -37,13 +20,7 @@ export type VerifiedCallContext = {
     exp: number;
 };
 
-/**
- * Optional config for TokenVerifier.
- *
- * grantResolver: If provided, resolves grants from an external source (DB/Redis).
- *   If it returns null for a capability, the call is denied.
- *   If not provided, falls back to in-memory registered grants.
- */
+/** grantResolver: resolve grants from DB/Redis instead of in-memory defaults. */
 export type VerifierConfig = {
     jwtMaxAge?: number;   // ms — default 60_000
     clockSkew?: number;   // ms — default 30_000
@@ -65,19 +42,11 @@ export class TokenVerifier {
         this.grantResolver = config?.grantResolver;
     }
 
-    /**
-     * Verify a token for a capability call.
-     *
-     * @param token       The agent+jwt token
-     * @param capability  The capability being requested
-     * @param grants      Optional pre-resolved grants (passed by app-wrapper at wrap time)
-     */
     async verify(
         token: string,
         capability: string,
         grants?: ResolvedGrant[]
     ): Promise<VerifiedCallContext> {
-        // ── Step 1-2: Decode ──────────────────────────────────────────────────
         let unsafeClaims: AgentJwtClaims;
         try {
             const decoded = decodeJwtUnsafe<AgentJwtClaims>(token);
@@ -138,7 +107,7 @@ export class TokenVerifier {
         this.assertTemporal(unsafeClaims);
 
         await this.jtiCache.assert(this.identity.agentId, unsafeClaims.jti);
-        // Priority: external grantResolver > passed grants array > in-memory identity
+
         let resolvedGrant: ResolvedGrant | null = null;
 
         if (this.grantResolver) {

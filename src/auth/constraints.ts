@@ -1,19 +1,4 @@
-/**
- * enforceConstraints — validates call arguments against a CapabilityGrant's constraints.
- *
- * Called after JWT verification passes and before capability.execute() is called.
- * Throws ChainAuthError("constraint_violated") if any constraint is not satisfied.
- *
- * Supported operators:
- *   { max: N }        → args[key] must be <= N
- *   { min: N }        → args[key] must be >= N
- *   { in: [...] }     → args[key] must be in the whitelist
- *   { not_in: [...] } → args[key] must NOT be in the blacklist
- *   <primitive>       → args[key] must exactly equal the primitive value
- *
- * Fields present in constraints but absent from args are allowed (optional fields).
- * Fields present in args but absent from constraints are unconstrained.
- */
+/** Validates call args against grant constraints (max/min/in/not_in/exact). Throws constraint_violated on failure. */
 
 import { ChainAuthError } from "../errors/chain-error.js";
 import type { GrantConstraints, ConstraintValue, ConstraintOperator, ConstraintPrimitive } from "../types/capabilities.js";

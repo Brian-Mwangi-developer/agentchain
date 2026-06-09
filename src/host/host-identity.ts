@@ -1,23 +1,4 @@
-/**
- * HostIdentity — the persistent identity anchor for one app/client environment.
- *
- * A Host holds an Ed25519 keypair. Its JWK thumbprint is the stable Host ID.
- * It signs host+jwt tokens for management operations (registering agents,
- * revoking, rotating keys) against an agent-auth compliant server.
- *
- * Security properties:
- * - Private key stays in process memory only (never persisted by default).
- * - Thumbprint (Host ID) is derived from the public key — cryptographically stable.
- * - On process restart, a new keypair is generated → new Host ID (key rotation).
- * - For stable identity across restarts use HostIdentity.fromKeyPair() with a
- *   persisted keypair.
- *
- * Storage:
- * - Uses the SHARED EncryptedStore passed in from the chain, not its own.
- *   Previously, HostIdentity created its own isolated store which caused the
- *   host registration to be siloed from the audit log and agent identity — now
- *   all chain state lives in a single store with a unified encryption key.
- */
+/** Ed25519 keypair and stable thumbprint for the Host. Signs host+jwt management tokens. */
 
 import { randomBytes } from "node:crypto";
 import {
@@ -61,9 +42,6 @@ export class HostIdentity {
         this.hostId = registration.hostId;
     }
 
-    /**
-     * Create a new HostIdentity with a freshly generated Ed25519 keypair.
-     */
     static async create(config: HostConfig, store: EncryptedStore): Promise<HostIdentity> {
         const { publicKey, privateKey } = await generateKeyPair();
         const publicKeyJwk = await exportPublicKeyJwk(publicKey);
@@ -82,11 +60,7 @@ export class HostIdentity {
         return new HostIdentity(privateKey, registration, store);
     }
 
-    /**
-     * Restore a HostIdentity from persisted keypair JWKs.
-     * Use this for stable host identity across process restarts.
-     * Uses the SHARED store passed in from the chain.
-     */
+    /** Restore from persisted JWKs for stable identity across process restarts. */
     static async fromKeyPair(
         privateKeyJwk: JsonWebKey,
         publicKeyJwk: JsonWebKey,
@@ -109,18 +83,11 @@ export class HostIdentity {
         return new HostIdentity(privateKey, registration, store);
     }
 
-    /**
-     * Export the private key as JWK so the caller can persist it.
-     * The caller is responsible for securing this value (env var, secrets manager, etc.).
-     */
+    /** Export private key as JWK for optional persistence. Secure this value yourself. */
     async exportPrivateKeyJwk(): Promise<JsonWebKey> {
         return exportPrivateKeyJwk(this.privateKey);
     }
 
-    /**
-     * Sign a 60-second host+jwt for management operations.
-     * @param extra  Optional additional claims (e.g. agent_public_key for registration)
-     */
     async signHostJwt(extra?: Partial<HostJwtClaims>): Promise<string> {
         const nowSeconds = Math.floor(Date.now() / 1000);
         const jti = base64UrlEncode(randomBytes(16));
@@ -137,12 +104,7 @@ export class HostIdentity {
         return signJwt(claims, this.privateKey, "host+jwt");
     }
 
-    /**
-     * Sign a host+jwt that embeds the agent's public key.
-     * Used when calling POST /agent/register on an agent-auth server.
-     * The server uses this to verify that a legitimate Host is vouching
-     * for this specific agent public key.
-     */
+    /** Sign a host+jwt embedding the agent's public key for POST /agent/register. */
     async signAgentRegistrationJwt(agentPublicKeyJwk: JsonWebKey): Promise<string> {
         return this.signHostJwt({ agent_public_key: agentPublicKeyJwk });
     }

@@ -1,14 +1,4 @@
-/**
- * AgentIdentity — holds the Ed25519 keypair and registration record for one agent.
- *
- * The private key is held exclusively in memory as a non-exportable CryptoKey
- * after the initial setup. The public key is stored (encrypted) in the
- * EncryptedStore as a JWK for verification during token checks.
- *
- * Agent ID format: <hostname>-agent-<32 hex chars>
- * Example: myapp-agent-a3f9bc1d2e4f6789abcdef0123456789
-
- */
+/** Ed25519 keypair and registration record for one agent, linked to its Host. */
 
 import {
     generateKeyPair,
@@ -31,14 +21,7 @@ export class AgentIdentity {
         this.registration = registration;
     }
 
-    /**
-     * Create a new agent identity.
-     *
-     * @param config  Agent configuration. Must include hostThumbprint and
-     *                hostPublicKeyJwk — these establish the Host → Agent
-     *                delegation chain and are embedded in every signed token.
-     * @param store   Shared EncryptedStore (owned by the chain, not this class).
-     */
+    /** hostThumbprint + hostPublicKeyJwk required — they anchor the Host → Agent chain. */
     static async create(config: AgentConfig, store: EncryptedStore): Promise<AgentIdentity> {
         if (!config.hostThumbprint || !config.hostPublicKeyJwk) {
             throw new Error(
@@ -76,14 +59,11 @@ export class AgentIdentity {
 
     static async restore(privateKey: CryptoKey, store: EncryptedStore): Promise<AgentIdentity> {
         const registration = store.get<RegisteredAgent>(STORE_KEY_IDENTITY);
-        if (!registration) {
-            throw new Error("AgentIdentity.restore: no identity found in store");
-        }
+        if (!registration) throw new Error("AgentIdentity.restore: no identity found in store");
         if (!registration.hostThumbprint || !registration.hostPublicKeyJwk) {
             throw new Error(
-                "AgentIdentity.restore: stored registration is missing host credentials. " +
-                "This identity was created with an older version of agents-chain. " +
-                "Re-create it via AgentsChain.create() to generate a protocol-compliant registration."
+                "AgentIdentity.restore: missing host credentials. " +
+                "Re-create via AgentsChain.create() to generate a protocol-compliant registration."
             );
         }
         return new AgentIdentity(privateKey, registration);
@@ -117,7 +97,6 @@ export class AgentIdentity {
         return importPublicKeyJwk(this.registration.publicKeyJwk);
     }
 
-    /** Import and return the host's public key for delegation chain verification. */
     async getHostPublicKey(): Promise<CryptoKey> {
         return importPublicKeyJwk(this.registration.hostPublicKeyJwk);
     }

@@ -6,11 +6,6 @@ export type AuditEntry = {
     agentId: string;
     agentName: string;
     hostname: string;
-    /**
-     * The thumbprint of the Host that registered this agent.
-     * Enables per-host audit attribution in multi-host deployments.
-     * Previously absent — audit entries could not be traced to a specific Host.
-     */
     hostThumbprint: string;
     capability: string;
     args: Record<string, unknown>;
@@ -20,6 +15,5 @@ export type AuditEntry = {
     jti: string;
     timestamp: number;
     durationMs: number;
-    /** Auth pipeline overhead in milliseconds (build + verify JWT). */
     authOverheadMs: number;
 };

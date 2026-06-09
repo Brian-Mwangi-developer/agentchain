@@ -1,26 +1,4 @@
-/**
- * AgentsChain — the main entry point for wrapping AI SDK clients.
- *
- * Creates a Host identity first, then an Agent identity that is cryptographically
- * linked to that Host. Every token signed by the agent carries the host's
- * thumbprint, enabling verifiers to confirm the delegation chain:
- *   HostIdentity (Ed25519) → signs AgentIdentity registration → Agent tokens
- *
- * Usage:
- *
- *   const chain = await AgentsChain.create({
- *     agentName: "summarizer",
- *     hostname: "my-app",        // → agentId: "my-app-agent-<32hex>"
- *     capabilities: ["chat.completion", "embedding"],
- *   });
- *
- *   const ai = chain.openai(new OpenAI({ apiKey }));
- *   const result = await ai.chat.completions.create({ model: "gpt-4o", ... });
- *
- *   const log = chain.getAuditLog();    // All calls, decrypted
- *   const stats = chain.getStats();     // Summary counts + auth overhead
- *   await chain.drain(exporter);        // Flush audit log to exporter
- */
+/** AgentsChain — wraps OpenAI/Anthropic SDK clients with auth, identity, and audit. */
 
 import { EncryptedStore } from "./memory/encrypted-store.js";
 import { JtiCache } from "./memory/jti-cache.js";
@@ -66,18 +44,6 @@ export class AgentsChain {
         this.defaultExporter = defaultExporter;
     }
 
-    /**
-     * Create an AgentsChain instance.
-     *
-     * Internally this:
-     * 1. Creates a shared EncryptedStore
-     * 2. Creates a HostIdentity (Ed25519 keypair)
-     * 3. Creates an AgentIdentity linked to that Host
-     * 4. Wires up TokenBuilder, TokenVerifier, JtiCache, AuditLog
-     *
-     * The agent's JWT tokens carry the host's thumbprint, enabling any verifier
-     * to confirm the Host → Agent delegation chain without an external call.
-     */
     static async create(config: AgentConfig): Promise<AgentsChain> {
         const store = EncryptedStore.create(config.encryptionKey);
         const jtiCache = new JtiCache(config.jtiAdapter);
@@ -108,7 +74,6 @@ export class AgentsChain {
         return new AgentsChain(store, host, identity, builder, verifier, log, config.auditExporter);
     }
 
-    // ─── SDK Wrappers ─────────────────────────────────────────────────────────
 
     openai<T extends object>(client: T): T {
         return wrapOpenAI(client, {
@@ -128,7 +93,6 @@ export class AgentsChain {
         });
     }
 
-    // ─── Accessors ────────────────────────────────────────────────────────────
 
     get agentId(): string {
         return this.identity.agentId;
@@ -175,15 +139,6 @@ export class AgentsChain {
         };
     }
 
-    /**
-     * Export all audit entries via the configured exporter, then clear the log.
-     * If no exporter is provided and none was configured at create time, the log
-     * is simply cleared.
-     *
-     * Call this on SIGTERM/SIGINT or periodically to prevent the audit log from
-     * growing unboundedly (it is capped at 10,000 entries internally, but drain
-     * ensures no entries are lost before the cap is hit in high-throughput use).
-     */
     async drain(exporter?: AuditExporter): Promise<void> {
         return this.log.drain(exporter ?? this.defaultExporter);
     }
@@ -191,30 +146,7 @@ export class AgentsChain {
 
 // ─── AppChain ─────────────────────────────────────────────────────────────────
 
-/**
- * AppChain — wraps any app object with capability-gated security.
- *
- * Unlike AgentsChain (which wraps AI SDKs), AppChain wraps your own service
- * objects or any external app, enforcing agent identity, permission grants,
- * constraint validation, and an audit trail on every capability call.
- *
- * Usage:
- *   const chain = await AppChain.create({
- *     providerName: "billing-service",
- *     issuer: "https://billing.mycompany.com",
- *     capabilities: [invoiceCapability, refundCapability],
- *   });
- *
- *   // Wrap your service — every call is identity-bound and audited
- *   const secured = chain.wrap(billingService, agentGrants);
- *   const invoice = await secured.createInvoice({ customerId: "c1", amount: 500 });
- *
- *   // Serve well-known for agent discovery
- *   app.get("/.well-known/agent-configuration", (req, res) => res.json(chain.getWellKnownConfig()));
- *
- *   // Flush audit on shutdown
- *   process.on("SIGTERM", () => chain.drain());
- */
+/** AppChain — wraps any service object with capability-gated auth, constraints, and audit. */
 export class AppChain {
     readonly host: HostIdentity;
 
@@ -287,13 +219,6 @@ export class AppChain {
         return new AppChain(host, registry, identity, builder, verifier, log, config.auditExporter);
     }
 
-    /**
-     * Wrap any object with capability-gated security.
-     *
-     * @param target  The service object to wrap
-     * @param grants  The resolved grants for the agent making calls
-     * @returns       A Proxy with the same type as target
-     */
     wrap<T extends object>(target: T, grants: ResolvedGrant[]): T {
         const ctx: AppInterceptContext = {
             identity: this.identity,
@@ -306,13 +231,7 @@ export class AppChain {
         return wrapApp(target, this.registry, ctx);
     }
 
-    /**
-     * Get the well-known configuration object.
-     * Serve this at GET /.well-known/agent-configuration.
-     *
-     * @param endpointPrefix Optional path prefix for all endpoint URLs
-     * @param opts           Optional description and jwks_uri for the discovery doc
-     */
+    /** Serve this at GET /.well-known/agent-configuration for agent discovery. */
     getWellKnownConfig(
         endpointPrefix?: string,
         opts?: { description?: string; jwks_uri?: string }
@@ -349,10 +268,6 @@ export class AppChain {
         };
     }
 
-    /**
-     * Export all audit entries via the configured exporter, then clear the log.
-     * If no exporter configured, the log is just cleared.
-     */
     async drain(exporter?: AuditExporter): Promise<void> {
         return this.log.drain(exporter ?? this.exporter);
     }

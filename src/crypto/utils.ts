@@ -15,21 +15,11 @@ export function base64UrlDecode(str: string): Buffer {
     return Buffer.from(padded.replace(/-/g, "+").replace(/_/g, "/"), "base64");
 }
 
-/**
- * Generate a cryptographically random ID.
- * Format: <prefix>_<22 base64url chars> (128-bit entropy).
- * When a hostname is provided the format is: <hostname>-<suffix>-<22chars>
- */
 export function generateId(prefix: string): string {
     const suffix = base64UrlEncode(randomBytes(16));
     return `${prefix}_${suffix}`;
 }
 
-/**
- * Build a host-scoped agent ID.
- * Format: <hostname>-agent-<32 hex chars>
- * The 32 hex chars = 128-bit random, making collision negligible.
- */
 export function generateAgentId(hostname: string): string {
     const random = randomBytes(16).toString("hex"); // 32 hex chars
     const safe = hostname.toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");

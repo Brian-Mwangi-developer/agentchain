@@ -1,2 +1,13 @@
-ARCHITECTURE.md
+# Source and dev files
+src/
+tsconfig.json
+pnpm-lock.yaml
+.gitignore
+
+# Documentation and images (not needed at runtime)
+*.md
 docs/
+agents-chain-dashboard.excalidraw
+
+# Compiled tests
+dist/__tests__/
