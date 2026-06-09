@@ -3,26 +3,25 @@
  *
  * Verification steps (must all pass before a capability call proceeds):
  *
- * 1. Decode JWT header — confirm typ = "agent+jwt"
- * 2. Decode payload — extract iss (thumbprint), sub (agentId), aud (capability)
- * 3. Verify sub matches the registered agentId — no foreign agents
- * 4. Verify iss matches the registered public key thumbprint — no key swap
- * 5. Verify aud matches the requested capability — scope-bound token
- * 6. Import the registered public key and verify the Ed25519 signature
- * 7. Check exp / iat temporal claims + clock skew
- * 8. Check jti uniqueness (replay protection) via JtiCache
- * 9. Verify the agent holds an active grant for the capability
- *
- * Steps 3-4 together prevent a valid token issued for a different agent
- * (or different key) from being presented against this identity.
+ * 1.  Decode JWT header — confirm typ = "agent+jwt"
+ * 2.  Decode payload — extract iss (agent thumbprint), sub (agentId), aud (capability)
+ * 3.  Verify sub matches the registered agentId — no foreign agents
+ * 4.  Verify iss matches the registered agent public key thumbprint — no key swap
+ * 5.  Verify aud matches the requested capability — scope-bound token
+ * 6.  Verify hostThumbprint claim matches the registered host — closes the gap
+ *     where a rogue self-issued agent was indistinguishable from a registered one
+ * 7.  Import the registered public key and verify the Ed25519 signature
+ * 8.  Check exp / iat temporal claims + clock skew
+ * 9.  Check jti uniqueness (replay protection) via JtiCache
+ * 10. Verify the agent holds an active grant for the capability
+ * 11. Check grant expiry
  */
 
 import { decodeJwtUnsafe, verifyJwtSignature } from "../crypto/ed25519.js";
 import { ChainAuthError } from "../errors/chain-error.js";
 import type { AgentIdentity } from "../identity/agent-identity.js";
 import type { JtiCache } from "../memory/jti-cache.js";
-import type { ResolvedGrant } from "../types/protocol.js";
-import type { AgentJwtClaims } from "./token-builder.js";
+import type { AgentJwtClaims, ResolvedGrant } from "../types/protocol.js";
 
 const CLOCK_SKEW_MS = 30_000;  // 30 seconds tolerance
 const JWT_MAX_AGE_MS = 60_000; // 60 seconds — matches TOKEN_TTL_SECONDS
@@ -31,7 +30,7 @@ export type VerifiedCallContext = {
     agentId: string;
     agentName: string;
     hostname: string;
-    hostId?: string;
+    hostThumbprint: string;
     capability: string;
     jti: string;
     iat: number;
@@ -41,16 +40,15 @@ export type VerifiedCallContext = {
 /**
  * Optional config for TokenVerifier.
  *
- * grantResolver: If provided, resolve grants from an external source (user's DB/Redis).
+ * grantResolver: If provided, resolves grants from an external source (DB/Redis).
  *   If it returns null for a capability, the call is denied.
- *   If not provided, the verifier falls back to the in-memory registered grants.
+ *   If not provided, falls back to in-memory registered grants.
  */
 export type VerifierConfig = {
     jwtMaxAge?: number;   // ms — default 60_000
     clockSkew?: number;   // ms — default 30_000
     grantResolver?: (agentId: string, capability: string) => Promise<ResolvedGrant | null>;
 };
-//NOTE:ResolvedGrant We can also have Resolved Grants
 
 export class TokenVerifier {
     private readonly jwtMaxAge: number;
@@ -79,6 +77,7 @@ export class TokenVerifier {
         capability: string,
         grants?: ResolvedGrant[]
     ): Promise<VerifiedCallContext> {
+        // ── Step 1-2: Decode ──────────────────────────────────────────────────
         let unsafeClaims: AgentJwtClaims;
         try {
             const decoded = decodeJwtUnsafe<AgentJwtClaims>(token);
@@ -96,18 +95,33 @@ export class TokenVerifier {
                 `JWT sub "${unsafeClaims.sub}" does not match registered agentId "${this.identity.agentId}"`
             );
         }
-
+        
         if (unsafeClaims.iss !== this.identity.thumbprint) {
             throw new ChainAuthError(
                 "token_invalid",
-                "JWT iss does not match registered public key thumbprint — possible key substitution attack"
+                "JWT iss does not match registered agent public key thumbprint — possible key substitution attack"
             );
         }
 
+     
         if (unsafeClaims.aud !== capability) {
             throw new ChainAuthError(
                 "capability_denied",
                 `JWT aud "${unsafeClaims.aud}" does not match requested capability "${capability}"`
+            );
+        }
+
+
+        if (!unsafeClaims.hostThumbprint) {
+            throw new ChainAuthError(
+                "token_invalid",
+                "JWT missing hostThumbprint claim — token was issued by a legacy or rogue agent"
+            );
+        }
+        if (unsafeClaims.hostThumbprint !== this.identity.hostThumbprint) {
+            throw new ChainAuthError(
+                "token_invalid",
+                "JWT hostThumbprint does not match the agent's registered host — delegation chain broken"
             );
         }
 
@@ -124,8 +138,6 @@ export class TokenVerifier {
         this.assertTemporal(unsafeClaims);
 
         await this.jtiCache.assert(this.identity.agentId, unsafeClaims.jti);
-
-        // ── Step 9: Resolve capability grant ─────────────────────────────────
         // Priority: external grantResolver > passed grants array > in-memory identity
         let resolvedGrant: ResolvedGrant | null = null;
 
@@ -142,28 +154,23 @@ export class TokenVerifier {
         }
 
         if (!resolvedGrant || resolvedGrant.status !== "active") {
-            const reason = resolvedGrant?.status === "pending"
-                ? `capability "${capability}" is pending approval`
-                : resolvedGrant?.status === "denied"
-                ? `capability "${capability}" has been denied`
-                : `agent "${this.identity.agentId}" does not hold a grant for capability "${capability}"`;
-
+            const reason =
+                resolvedGrant?.status === "pending"
+                    ? `capability "${capability}" is pending approval`
+                    : resolvedGrant?.status === "denied"
+                    ? `capability "${capability}" has been denied`
+                    : `agent "${this.identity.agentId}" does not hold a grant for capability "${capability}"`;
             throw new ChainAuthError("capability_denied", reason);
         }
-
-        // Check grant expiry
         if (resolvedGrant.expiresAt !== undefined && resolvedGrant.expiresAt < Date.now()) {
             throw new ChainAuthError("capability_denied", `Grant for "${capability}" has expired`);
         }
-
-        // ── Step 9b: Enforce constraints ─────────────────────────────────────
-        // Constraints are enforced here so they apply to ALL callers (app-wrapper and AI wrappers)
-        // App-wrapper also enforces before execute() — this is the canonical enforcement point.
 
         return {
             agentId: this.identity.agentId,
             agentName: this.identity.registration.agentName,
             hostname: this.identity.registration.hostname,
+            hostThumbprint: this.identity.hostThumbprint,
             capability,
             jti: unsafeClaims.jti,
             iat: unsafeClaims.iat,
@@ -181,7 +188,10 @@ export class TokenVerifier {
         const expMs = claims.exp * 1000;
 
         if (iatMs > nowMs + this.clockSkew) {
-            throw new ChainAuthError("token_invalid", "JWT iat is in the future — clock skew too large or token pre-generated");
+            throw new ChainAuthError(
+                "token_invalid",
+                "JWT iat is in the future — clock skew too large or token pre-generated"
+            );
         }
 
         if (expMs < nowMs - this.clockSkew) {

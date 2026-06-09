@@ -1,11 +1,18 @@
 /**
  * AuditLog — append-only encrypted log of all capability call attempts.
  *
- * Every intercepted call (success, denied, or error) is recorded.
- * Entries are encrypted with AES-256-GCM before being written to the store,
- * so even if someone inspects process memory they see only ciphertext.
+ * Every intercepted call (success, denied, or error) is recorded with full
+ * attribution: agentId, agentName, hostname, hostThumbprint (new), capability,
+ * sanitized args, result, and timing.
  *
+ * Entries are encrypted with AES-256-GCM before being written to the store.
  * The log is append-only within a session. There is no delete API.
+ *
+ * Memory management:
+ * The log is capped at MAX_ENTRIES. When the cap is reached, the oldest entry
+ * is evicted before a new one is appended. This prevents unbounded memory
+ * growth in long-running processes. Call drain() to flush + clear before the
+ * cap is hit in high-throughput scenarios.
  */
 
 import { generateId } from "../crypto/utils.js";
@@ -16,34 +23,44 @@ import type { AuditExporter } from "./audit-exporter.js";
 
 const STORE_KEY_LOG = "audit:log";
 
+/** Maximum number of entries held in memory before oldest are evicted. */
+const MAX_ENTRIES = 1000;
+
 export type RecordDeniedOptions = {
     agentId: string;
     agentName: string;
     hostname: string;
+    /** The host thumbprint from the agent registration. */
+    hostThumbprint: string;
     capability: string;
     args: Record<string, unknown>;
     reason: string;
     jti: string;
+    /** Milliseconds spent inside the auth pipeline before the denial. */
+    authOverheadMs: number;
 };
 
 export type RecordCallOptions = {
-    context: VerifiedCallContext; //NOTE: This is  not complete 
+    context: VerifiedCallContext;
     args: Record<string, unknown>;
     result: Exclude<AuditResult, "denied">;
     durationMs: number;
     errorMessage?: string;
+    /** Milliseconds spent inside build+verify JWT pipeline. */
+    authOverheadMs: number;
 };
 
 export class AuditLog {
     constructor(private readonly store: EncryptedStore) {}
 
-    /** Record a denied capability call (before the SDK is touched). */
+    /** Record a denied capability call (before the underlying SDK/service is touched). */
     recordDenied(opts: RecordDeniedOptions): AuditEntry {
         const entry: AuditEntry = {
             id: generateId("aud"),
             agentId: opts.agentId,
             agentName: opts.agentName,
             hostname: opts.hostname,
+            hostThumbprint: opts.hostThumbprint,
             capability: opts.capability,
             args: sanitizeArgs(opts.args),
             result: "denied",
@@ -51,9 +68,9 @@ export class AuditLog {
             jti: opts.jti,
             timestamp: Date.now(),
             durationMs: 0,
+            authOverheadMs: opts.authOverheadMs,
         };
-        //NOTE:Fix this since it does not Contain Hosts credentials
-        this.store.append<AuditEntry>(STORE_KEY_LOG, entry);
+        this.appendCapped(entry);
         return entry;
     }
 
@@ -64,6 +81,7 @@ export class AuditLog {
             agentId: opts.context.agentId,
             agentName: opts.context.agentName,
             hostname: opts.context.hostname,
+            hostThumbprint: opts.context.hostThumbprint,
             capability: opts.context.capability,
             args: sanitizeArgs(opts.args),
             result: opts.result,
@@ -71,11 +89,11 @@ export class AuditLog {
             jti: opts.context.jti,
             timestamp: Date.now(),
             durationMs: opts.durationMs,
+            authOverheadMs: opts.authOverheadMs,
         };
-        this.store.append<AuditEntry>(STORE_KEY_LOG, entry);
+        this.appendCapped(entry);
         return entry;
     }
-    //NOTE:Fix this also it contains wrong Agent Identity
 
     /** Return all decrypted audit entries for this session. */
     getAll(): AuditEntry[] {
@@ -99,21 +117,30 @@ export class AuditLog {
     /**
      * Export all entries via the provided exporter, then clear the in-memory log.
      *
-     * Call this periodically or on process shutdown to push entries to a
-     * persistent destination (database, HTTP endpoint, log aggregator, etc.).
-     *
-     * If no exporter is provided, the log is simply cleared without exporting.
+     * Call periodically or on process shutdown to push entries to a persistent
+     * destination (database, HTTP endpoint, log aggregator, etc.).
+     * If no exporter is provided, the log is cleared without exporting.
      */
     async drain(exporter?: AuditExporter): Promise<void> {
         const entries = this.getAll();
         if (entries.length === 0) return;
-
         if (exporter) {
             await exporter.export(entries);
         }
-
-        // Clear the log after export
         this.store.set(STORE_KEY_LOG, [] as AuditEntry[]);
+    }
+
+    /**
+     * Append an entry, evicting the oldest if at the cap.
+     * O(n) on eviction — acceptable since eviction only happens after MAX_ENTRIES
+     */
+    private appendCapped(entry: AuditEntry): void {
+        const existing = this.store.get<AuditEntry[]>(STORE_KEY_LOG) ?? [];
+        if (existing.length >= MAX_ENTRIES) {
+            existing.shift(); // remove oldest
+        }
+        existing.push(entry);
+        this.store.set(STORE_KEY_LOG, existing);
     }
 }
 

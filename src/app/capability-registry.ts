@@ -44,18 +44,24 @@ export class CapabilityRegistry {
      * Build an AgentConfiguration object suitable for serving at
      * GET /.well-known/agent-configuration.
      *
+     * Endpoint paths match the agent-auth protocol spec (1.0-draft).
+     * Consumers are responsible for implementing these routes in their server.
+     *
      * @param issuer         The base URL of the server (e.g. "https://billing.mycompany.com")
      * @param providerName   Short name for the app (e.g. "billing-service")
      * @param endpointPrefix Optional prefix for endpoint paths (default: "")
+     * @param opts           Optional fields: description, jwks_uri
      */
     buildWellKnownConfig(
         issuer: string,
         providerName: string,
-        endpointPrefix = ""
+        endpointPrefix = "",
+        opts?: { description?: string; jwks_uri?: string }
     ): AgentConfiguration {
         return {
             version: "1.0-draft",
             provider_name: providerName,
+            ...(opts?.description ? { description: opts.description } : {}),
             issuer,
             algorithms: ["Ed25519"],
             modes: ["delegated", "autonomous"],
@@ -63,14 +69,17 @@ export class CapabilityRegistry {
             endpoints: {
                 register: `${endpointPrefix}/agent/register`,
                 capabilities: `${endpointPrefix}/capability/list`,
+                describe_capability: `${endpointPrefix}/capability/describe`,
                 execute: `${endpointPrefix}/capability/execute`,
                 status: `${endpointPrefix}/agent/status`,
                 reactivate: `${endpointPrefix}/agent/reactivate`,
                 revoke: `${endpointPrefix}/agent/revoke`,
                 rotate_key: `${endpointPrefix}/agent/rotate-key`,
                 request_capability: `${endpointPrefix}/agent/request-capability`,
+                introspect: `${endpointPrefix}/agent/introspect`,
             },
             default_capabilities: Array.from(this.caps.keys()),
+            ...(opts?.jwks_uri ? { jwks_uri: opts.jwks_uri } : {}),
         };
     }
 }

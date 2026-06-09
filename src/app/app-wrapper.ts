@@ -74,11 +74,13 @@ function createInterceptedMethod(
         const callArgs = (args[0] ?? {}) as Record<string, unknown>;
 
         let jti = "unknown";
+        const authStart = Date.now();
         try {
-            // Build + verify the single-use JWT
+            // Build + verify a fresh single-use JWT
             const { token, claims } = await ctx.builder.build(capabilityName);
             jti = claims.jti;
             const verified = await ctx.verifier.verify(token, capabilityName, ctx.grants);
+            const authOverheadMs = Date.now() - authStart;
 
             // Enforce grant constraints against call arguments
             const grant = ctx.grants.find(
@@ -91,7 +93,7 @@ function createInterceptedMethod(
             // Build agent context for capability.execute()
             const agentContext: AgentContext = {
                 agentId: verified.agentId,
-                hostId: verified.hostId ?? "",
+                hostId: verified.hostThumbprint,
                 permissions: ctx.grants
                     .filter((g) => g.status === "active")
                     .map((g) => g.capability),
@@ -106,7 +108,7 @@ function createInterceptedMethod(
                 );
             }
 
-            const start = Date.now();
+            const callStart = Date.now();
             let result: unknown;
             try {
                 result = await registryEntry.execute(callArgs, agentContext);
@@ -115,8 +117,9 @@ function createInterceptedMethod(
                     context: verified,
                     args: callArgs,
                     result: "error",
-                    durationMs: Date.now() - start,
+                    durationMs: Date.now() - callStart,
                     errorMessage: execErr instanceof Error ? execErr.message : String(execErr),
+                    authOverheadMs,
                 });
                 throw execErr;
             }
@@ -125,7 +128,8 @@ function createInterceptedMethod(
                 context: verified,
                 args: callArgs,
                 result: "success",
-                durationMs: Date.now() - start,
+                durationMs: Date.now() - callStart,
+                authOverheadMs,
             });
 
             return result;
@@ -135,10 +139,12 @@ function createInterceptedMethod(
                     agentId: ctx.identity.agentId,
                     agentName: ctx.identity.registration.agentName,
                     hostname: ctx.identity.registration.hostname,
+                    hostThumbprint: ctx.identity.registration.hostThumbprint,
                     capability: capabilityName,
                     args: callArgs,
                     reason: err.message,
                     jti,
+                    authOverheadMs: Date.now() - authStart,
                 });
                 throw err;
             }

@@ -1,6 +1,5 @@
 import type { AuditExporter } from "../audit/audit-exporter.js";
 import type { VerifierConfig } from "../auth/token-verifier.js";
-import type { HostConfig } from "../host/host-identity.js";
 import type { JtiPersistenceAdapter } from "../memory/jti-cache.js";
 import type { AuditEntry } from "./audit.js";
 import type { Capability } from "./capabilities.js";
@@ -34,11 +33,13 @@ export type AppChainConfig = {
     encryptionKey?: string;
 
     /**
-     * Optional Host identity config. If provided, a HostIdentity is created
-     * with this config so the chain can sign Host JWTs.
+     * Optional Host identity overrides.
      * Defaults to { name: providerName, issuerUrl: issuer }.
      */
-    host?: Partial<HostConfig>;
+    host?: {
+        name?: string;
+        issuerUrl?: string;
+    };
 
     /**
      * Optional JTI persistence adapter (e.g. Redis).
@@ -48,7 +49,6 @@ export type AppChainConfig = {
 
     /**
      * Optional audit exporter for auto-draining entries on drain().
-     * Default: ConsoleAuditExporter (logs to stdout).
      */
     auditExporter?: AuditExporter;
 
@@ -63,6 +63,8 @@ export type AppChainConfig = {
 
 export type ChainStats = {
     agentId: string;
+    /** The Host ID (JWK thumbprint) that registered this agent. */
+    hostId: string;
     agentName: string;
     hostname: string;
     totalCalls: number;
@@ -70,6 +72,14 @@ export type ChainStats = {
     deniedCalls: number;
     errorCalls: number;
     registeredAt: number;
+    /**
+     * Auth pipeline overhead stats across all recorded calls.
+     * Use these to measure the latency cost of the security layer.
+     */
+    authOverhead: {
+        avgMs: number;
+        maxMs: number;
+    };
 };
 
 export type AuditSnapshot = {

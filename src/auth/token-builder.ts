@@ -4,28 +4,23 @@
  * Security design:
  * - Every token is single-use: a fresh cryptographically random jti per call.
  * - TTL is 60 seconds — minimal viable window for a synchronous SDK call.
- * - The iss claim is the public key thumbprint (not a mutable name string).
- *   This ties the token cryptographically to the specific keypair.
- * - The sub is the agentId (<hostname>-agent-<32hex>).
- * - The aud is the capability name — a token for "chat.completion" cannot
- *   be presented as authorization for "embedding".
+ * - iss = agent's own JWK thumbprint — ties the token to this specific keypair.
+ * - sub = agentId (<hostname>-agent-<32hex>) — stable agent identifier.
+ * - aud = capability name — a token for "chat.completion" cannot authorize
+ *   "embedding". Scope-bound tokens prevent capability escalation.
+ * - hostThumbprint = the Host that registered this agent, embedded in every
+ *   token. Verifiers can confirm the agent has a legitimate parent host
+ *   without needing an external registry call. This closes the gap where
+ *   a rogue self-issued agent was indistinguishable from a registered one.
  */
 
 import { randomBytes } from "node:crypto";
 import { signJwt } from "../crypto/ed25519.js";
 import { base64UrlEncode } from "../crypto/utils.js";
 import type { AgentIdentity } from "../identity/agent-identity.js";
-//NOTE:Confirm this Agent Issuing.
-export type AgentJwtClaims = {
-    iss: string;
-    sub: string;
-    aud: string;
-    iat: number;
-    exp: number;
-    jti: string;
-    hostname: string;
-    agentName: string;
-};
+import type { AgentJwtClaims } from "../types/protocol.js";
+
+export type { AgentJwtClaims };
 
 const TOKEN_TTL_SECONDS = 60;
 
@@ -45,6 +40,7 @@ export class TokenBuilder {
             jti,
             hostname: this.identity.registration.hostname,
             agentName: this.identity.registration.agentName,
+            hostThumbprint: this.identity.registration.hostThumbprint,
         };
 
         const token = await signJwt(claims, this.identity.privateKey, "agent+jwt");

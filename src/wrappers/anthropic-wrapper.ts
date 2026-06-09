@@ -79,12 +79,14 @@ function createInterceptedMethod(
         const callArgs = (args[0] ?? {}) as Record<string, unknown>;
 
         let jti = "unknown";
+        const authStart = Date.now();
         try {
             const { token, claims } = await ctx.builder.build(capability);
             jti = claims.jti;
             const verified = await ctx.verifier.verify(token, capability);
+            const authOverheadMs = Date.now() - authStart;
 
-            const start = Date.now();
+            const callStart = Date.now();
             let result: unknown;
             try {
                 result = await Promise.resolve(originalFn(...args));
@@ -93,8 +95,9 @@ function createInterceptedMethod(
                     context: verified,
                     args: callArgs,
                     result: "error",
-                    durationMs: Date.now() - start,
+                    durationMs: Date.now() - callStart,
                     errorMessage: sdkErr instanceof Error ? sdkErr.message : String(sdkErr),
+                    authOverheadMs,
                 });
                 throw sdkErr;
             }
@@ -103,7 +106,8 @@ function createInterceptedMethod(
                 context: verified,
                 args: callArgs,
                 result: "success",
-                durationMs: Date.now() - start,
+                durationMs: Date.now() - callStart,
+                authOverheadMs,
             });
 
             return result;
@@ -113,10 +117,12 @@ function createInterceptedMethod(
                     agentId: ctx.identity.agentId,
                     agentName: ctx.identity.registration.agentName,
                     hostname: ctx.identity.registration.hostname,
+                    hostThumbprint: ctx.identity.registration.hostThumbprint,
                     capability,
                     args: callArgs,
                     reason: err.message,
                     jti,
+                    authOverheadMs: Date.now() - authStart,
                 });
                 throw err;
             }

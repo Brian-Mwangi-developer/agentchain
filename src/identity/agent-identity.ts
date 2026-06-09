@@ -7,6 +7,7 @@
  *
  * Agent ID format: <hostname>-agent-<32 hex chars>
  * Example: myapp-agent-a3f9bc1d2e4f6789abcdef0123456789
+
  */
 
 import {
@@ -31,13 +32,22 @@ export class AgentIdentity {
     }
 
     /**
-     * Create a new agent identity:
-     * 1. Generate an Ed25519 keypair
-     * 2. Derive the agentId from hostname
-     * 3. Compute the public key thumbprint (used as the JWT `iss`)
-     * 4. Store the registration (encrypted) in the provided store
+     * Create a new agent identity.
+     *
+     * @param config  Agent configuration. Must include hostThumbprint and
+     *                hostPublicKeyJwk — these establish the Host → Agent
+     *                delegation chain and are embedded in every signed token.
+     * @param store   Shared EncryptedStore (owned by the chain, not this class).
      */
     static async create(config: AgentConfig, store: EncryptedStore): Promise<AgentIdentity> {
+        if (!config.hostThumbprint || !config.hostPublicKeyJwk) {
+            throw new Error(
+                "AgentIdentity.create: hostThumbprint and hostPublicKeyJwk are required. " +
+                "Every agent must be cryptographically linked to a Host. " +
+                "Use AgentsChain.create() or AppChain.create() which supply these automatically."
+            );
+        }
+
         const { publicKey, privateKey } = await generateKeyPair();
         const publicKeyJwk = await exportPublicKeyJwk(publicKey);
         const thumbprint = computeJwkThumbprint(publicKeyJwk);
@@ -47,7 +57,7 @@ export class AgentIdentity {
             capability: cap,
             grantedAt: Date.now(),
         }));
-        // Registered Agent needs to be having Host details
+
         const registration: RegisteredAgent = {
             agentId,
             agentName: config.agentName,
@@ -56,10 +66,11 @@ export class AgentIdentity {
             thumbprint,
             capabilities: grants,
             registeredAt: Date.now(),
+            hostThumbprint: config.hostThumbprint,
+            hostPublicKeyJwk: config.hostPublicKeyJwk,
         };
 
         store.set(STORE_KEY_IDENTITY, registration);
-
         return new AgentIdentity(privateKey, registration);
     }
 
@@ -68,10 +79,16 @@ export class AgentIdentity {
         if (!registration) {
             throw new Error("AgentIdentity.restore: no identity found in store");
         }
+        if (!registration.hostThumbprint || !registration.hostPublicKeyJwk) {
+            throw new Error(
+                "AgentIdentity.restore: stored registration is missing host credentials. " +
+                "This identity was created with an older version of agents-chain. " +
+                "Re-create it via AgentsChain.create() to generate a protocol-compliant registration."
+            );
+        }
         return new AgentIdentity(privateKey, registration);
     }
 
-   
     get agentId(): string {
         return this.registration.agentId;
     }
@@ -80,11 +97,14 @@ export class AgentIdentity {
         return this.registration.thumbprint;
     }
 
-   
+    get hostThumbprint(): string {
+        return this.registration.hostThumbprint;
+    }
+
     get capabilityNames(): string[] {
         return this.registration.capabilities.map((g) => g.capability);
     }
-  
+
     hasCapability(name: string): boolean {
         return this.registration.capabilities.some((g) => g.capability === name);
     }
@@ -95,5 +115,10 @@ export class AgentIdentity {
 
     async getPublicKey(): Promise<CryptoKey> {
         return importPublicKeyJwk(this.registration.publicKeyJwk);
+    }
+
+    /** Import and return the host's public key for delegation chain verification. */
+    async getHostPublicKey(): Promise<CryptoKey> {
+        return importPublicKeyJwk(this.registration.hostPublicKeyJwk);
     }
 }

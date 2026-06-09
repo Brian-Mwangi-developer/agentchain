@@ -32,31 +32,25 @@ export type { AgentConfig, ChainStats, AuditSnapshot, AppChainConfig } from "./t
 
 export type { AuditEntry, AuditResult } from "./types/audit.js";
 
-// ─── Types: identity (legacy AgentsChain) ─────────────────────────────────────
+// ─── Types: identity ─────────────────────────────────────────────────────────
 
 export type {
     RegisteredAgent,
     CapabilityGrant,
     CapabilityConstraints,
-    ConstraintOperator,
-    ConstraintValue,
-    ConstraintPrimitive,
 } from "./types/identity.js";
 
 // ─── Types: capabilities ──────────────────────────────────────────────────────
+// Canonical location for all constraint types.
 
 export type {
     Capability,
     AgentContext,
     GrantConstraints,
     JsonSchemaObject,
-} from "./types/capabilities.js";
-
-// Re-export constraint types from capabilities (canonical location)
-export type {
-    ConstraintOperator as CapabilityConstraintOperator,
-    ConstraintValue as CapabilityConstraintValue,
-    ConstraintPrimitive as CapabilityConstraintPrimitive,
+    ConstraintOperator,
+    ConstraintValue,
+    ConstraintPrimitive,
 } from "./types/capabilities.js";
 
 // ─── Types: protocol (wire format) ───────────────────────────────────────────

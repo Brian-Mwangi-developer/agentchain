@@ -1,5 +1,10 @@
 /**
- * AgentsChain — the main entry point for the agents-chain package.
+ * AgentsChain — the main entry point for wrapping AI SDK clients.
+ *
+ * Creates a Host identity first, then an Agent identity that is cryptographically
+ * linked to that Host. Every token signed by the agent carries the host's
+ * thumbprint, enabling verifiers to confirm the delegation chain:
+ *   HostIdentity (Ed25519) → signs AgentIdentity registration → Agent tokens
  *
  * Usage:
  *
@@ -13,7 +18,8 @@
  *   const result = await ai.chat.completions.create({ model: "gpt-4o", ... });
  *
  *   const log = chain.getAuditLog();    // All calls, decrypted
- *   const stats = chain.getStats();     // Summary counts
+ *   const stats = chain.getStats();     // Summary counts + auth overhead
+ *   await chain.drain(exporter);        // Flush audit log to exporter
  */
 
 import { EncryptedStore } from "./memory/encrypted-store.js";
@@ -39,30 +45,67 @@ export class AgentsChain {
     private readonly builder: TokenBuilder;
     private readonly verifier: TokenVerifier;
     private readonly log: AuditLog;
+    readonly host: HostIdentity;
+    private readonly defaultExporter?: AuditExporter;
 
     private constructor(
         store: EncryptedStore,
+        host: HostIdentity,
         identity: AgentIdentity,
         builder: TokenBuilder,
         verifier: TokenVerifier,
-        log: AuditLog
+        log: AuditLog,
+        defaultExporter?: AuditExporter
     ) {
         this.store = store;
+        this.host = host;
         this.identity = identity;
         this.builder = builder;
         this.verifier = verifier;
         this.log = log;
+        this.defaultExporter = defaultExporter;
     }
 
+    /**
+     * Create an AgentsChain instance.
+     *
+     * Internally this:
+     * 1. Creates a shared EncryptedStore
+     * 2. Creates a HostIdentity (Ed25519 keypair)
+     * 3. Creates an AgentIdentity linked to that Host
+     * 4. Wires up TokenBuilder, TokenVerifier, JtiCache, AuditLog
+     *
+     * The agent's JWT tokens carry the host's thumbprint, enabling any verifier
+     * to confirm the Host → Agent delegation chain without an external call.
+     */
     static async create(config: AgentConfig): Promise<AgentsChain> {
         const store = EncryptedStore.create(config.encryptionKey);
-        const jtiCache = new JtiCache();
-        const identity = await AgentIdentity.create(config, store);
+        const jtiCache = new JtiCache(config.jtiAdapter);
+
+        // Create the Host first — the agent registration must reference it
+        const host = await HostIdentity.create(
+            {
+                name: config.agentName,
+                issuerUrl: config.hostname,
+            },
+            store
+        );
+
+        // Create agent identity linked to this host
+        const identity = await AgentIdentity.create(
+            {
+                ...config,
+                hostThumbprint: host.thumbprint,
+                hostPublicKeyJwk: host.getPublicKeyJwk(),
+            },
+            store
+        );
+
         const builder = new TokenBuilder(identity);
         const verifier = new TokenVerifier(identity, jtiCache);
         const log = new AuditLog(store);
 
-        return new AgentsChain(store, identity, builder, verifier, log);
+        return new AgentsChain(store, host, identity, builder, verifier, log, config.auditExporter);
     }
 
     // ─── SDK Wrappers ─────────────────────────────────────────────────────────
@@ -85,15 +128,24 @@ export class AgentsChain {
         });
     }
 
+    // ─── Accessors ────────────────────────────────────────────────────────────
+
     get agentId(): string {
         return this.identity.agentId;
     }
+
+    get hostId(): string {
+        return this.host.hostId;
+    }
+
     get capabilities(): string[] {
         return this.identity.capabilityNames;
     }
+
     getAuditLog(): AuditEntry[] {
         return this.log.getAll();
     }
+
     exportAudit(): AuditSnapshot {
         return {
             agentId: this.identity.agentId,
@@ -101,18 +153,39 @@ export class AgentsChain {
             exportedAt: Date.now(),
         };
     }
+
     getStats(): ChainStats {
         const entries = this.log.getAll();
+        const successEntries = entries.filter((e) => e.result === "success");
+        const totalAuthMs = entries.reduce((sum, e) => sum + e.authOverheadMs, 0);
+        const avgAuthMs = entries.length > 0 ? Math.round(totalAuthMs / entries.length) : 0;
+        const maxAuthMs = entries.length > 0 ? Math.max(...entries.map((e) => e.authOverheadMs)) : 0;
+
         return {
             agentId: this.identity.agentId,
+            hostId: this.host.hostId,
             agentName: this.identity.registration.agentName,
             hostname: this.identity.registration.hostname,
             totalCalls: entries.length,
-            successfulCalls: entries.filter((e) => e.result === "success").length,
+            successfulCalls: successEntries.length,
             deniedCalls: entries.filter((e) => e.result === "denied").length,
             errorCalls: entries.filter((e) => e.result === "error").length,
             registeredAt: this.identity.registration.registeredAt,
+            authOverhead: { avgMs: avgAuthMs, maxMs: maxAuthMs },
         };
+    }
+
+    /**
+     * Export all audit entries via the configured exporter, then clear the log.
+     * If no exporter is provided and none was configured at create time, the log
+     * is simply cleared.
+     *
+     * Call this on SIGTERM/SIGINT or periodically to prevent the audit log from
+     * growing unboundedly (it is capped at 10,000 entries internally, but drain
+     * ensures no entries are lost before the cap is hit in high-throughput use).
+     */
+    async drain(exporter?: AuditExporter): Promise<void> {
+        return this.log.drain(exporter ?? this.defaultExporter);
     }
 }
 
@@ -171,16 +244,30 @@ export class AppChain {
     }
 
     static async create(config: AppChainConfig): Promise<AppChain> {
+        // Single shared EncryptedStore for all chain state (host, agent, audit log)
         const store = EncryptedStore.create(config.encryptionKey);
         const jtiCache = new JtiCache(config.jtiAdapter);
 
-        // Create a synthetic agent identity for this app chain instance
+        // Create Host identity FIRST — agent registration references it.
+        // Uses the shared store (not its own isolated store as it did before).
+        const host = await HostIdentity.create(
+            {
+                name: config.host?.name ?? config.providerName,
+                issuerUrl: config.host?.issuerUrl ?? config.issuer,
+            },
+            store
+        );
+
+        // Create the app's own agent identity, linked to the Host above.
+        // hostThumbprint + hostPublicKeyJwk are embedded in every token this
+        // agent signs, closing the rogue-agent gap.
         const identity = await AgentIdentity.create(
             {
                 agentName: config.providerName,
                 hostname: config.providerName,
                 capabilities: config.capabilities.map((c) => c.name),
-                encryptionKey: config.encryptionKey,
+                hostThumbprint: host.thumbprint,
+                hostPublicKeyJwk: host.getPublicKeyJwk(),
             },
             store
         );
@@ -196,13 +283,6 @@ export class AppChain {
         for (const cap of config.capabilities) {
             registry.register(cap);
         }
-
-        // Create Host identity for signing agent registration JWTs
-        const host = await HostIdentity.create({
-            name: config.host?.name ?? config.providerName,
-            issuerUrl: config.host?.issuerUrl ?? config.issuer,
-            encryptionKey: config.encryptionKey,
-        });
 
         return new AppChain(host, registry, identity, builder, verifier, log, config.auditExporter);
     }
@@ -229,12 +309,19 @@ export class AppChain {
     /**
      * Get the well-known configuration object.
      * Serve this at GET /.well-known/agent-configuration.
+     *
+     * @param endpointPrefix Optional path prefix for all endpoint URLs
+     * @param opts           Optional description and jwks_uri for the discovery doc
      */
-    getWellKnownConfig(endpointPrefix?: string): AgentConfiguration {
+    getWellKnownConfig(
+        endpointPrefix?: string,
+        opts?: { description?: string; jwks_uri?: string }
+    ): AgentConfiguration {
         return this.registry.buildWellKnownConfig(
             this.host.getRegistration().issuerUrl,
             this.host.getRegistration().name,
-            endpointPrefix
+            endpointPrefix,
+            opts
         );
     }
 
@@ -244,8 +331,13 @@ export class AppChain {
 
     getStats(): ChainStats {
         const entries = this.log.getAll();
+        const totalAuthMs = entries.reduce((sum, e) => sum + e.authOverheadMs, 0);
+        const avgAuthMs = entries.length > 0 ? Math.round(totalAuthMs / entries.length) : 0;
+        const maxAuthMs = entries.length > 0 ? Math.max(...entries.map((e) => e.authOverheadMs)) : 0;
+
         return {
             agentId: this.identity.agentId,
+            hostId: this.host.hostId,
             agentName: this.identity.registration.agentName,
             hostname: this.identity.registration.hostname,
             totalCalls: entries.length,
@@ -253,6 +345,7 @@ export class AppChain {
             deniedCalls: entries.filter((e) => e.result === "denied").length,
             errorCalls: entries.filter((e) => e.result === "error").length,
             registeredAt: this.identity.registration.registeredAt,
+            authOverhead: { avgMs: avgAuthMs, maxMs: maxAuthMs },
         };
     }
 

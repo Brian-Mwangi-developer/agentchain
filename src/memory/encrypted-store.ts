@@ -95,7 +95,6 @@ export class EncryptedStore {
         return JSON.parse(plaintext) as T;
     }
 
-   
     append<T>(key: string, item: T): void {
         const existing = this.get<T[]>(key) ?? [];
         existing.push(item);
