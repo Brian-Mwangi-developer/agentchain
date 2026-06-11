@@ -1,4 +1,4 @@
-/** AES-256-GCM in-memory key-value store. Each value encrypted with a fresh random IV. */
+/** AES-256-GCM key-value store. Each value encrypted with a fresh random IV. Supports optional persistence adapter. */
 
 import { randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
 
@@ -6,16 +6,25 @@ const ALGORITHM = "aes-256-gcm";
 const IV_BYTES = 12;      // 96-bit IV — GCM recommended
 const TAG_BYTES = 16;     // 128-bit auth tag — maximum GCM strength
 
+/** Plug in a persistent backend (e.g. Redis, SQLite, file-system) for durable storage. */
+export interface StorePersistenceAdapter {
+    get(key: string): Promise<string | undefined>;
+    set(key: string, value: string): Promise<void>;
+    delete(key: string): Promise<void>;
+}
+
 export class EncryptedStore {
     private readonly key: Buffer;
     private readonly store = new Map<string, string>();
+    private readonly adapter?: StorePersistenceAdapter;
 
-    private constructor(key: Buffer) {
+    private constructor(key: Buffer, adapter?: StorePersistenceAdapter) {
         this.key = key;
+        this.adapter = adapter;
     }
 
     /** @param hexKey Optional 64-char hex string (32 bytes). Random key generated if omitted. */
-    static create(hexKey?: string): EncryptedStore {
+    static create(hexKey?: string, adapter?: StorePersistenceAdapter): EncryptedStore {
         let key: Buffer;
         if (hexKey) {
             if (!/^[0-9a-fA-F]{64}$/.test(hexKey)) {
@@ -25,10 +34,10 @@ export class EncryptedStore {
         } else {
             key = randomBytes(32);
         }
-        return new EncryptedStore(key);
+        return new EncryptedStore(key, adapter);
     }
 
-    set(key: string, value: unknown): void {
+    private encrypt(value: unknown): string {
         const plaintext = JSON.stringify(value);
         const iv = randomBytes(IV_BYTES);
         const cipher = createCipheriv(ALGORITHM, this.key, iv);
@@ -38,20 +47,14 @@ export class EncryptedStore {
         ]);
         const tag = cipher.getAuthTag();
 
-        // Format: base64(iv):base64(tag):base64(ciphertext)
-        const encoded = [
+        return [
             iv.toString("base64"),
             tag.toString("base64"),
             encrypted.toString("base64"),
         ].join(":");
-
-        this.store.set(key, encoded);
     }
 
-    get<T>(key: string): T | undefined {
-        const encoded = this.store.get(key);
-        if (!encoded) return undefined;
-
+    private decrypt<T>(key: string, encoded: string): T {
         const parts = encoded.split(":");
         if (parts.length !== 3) {
             throw new Error(`EncryptedStore: corrupted entry at key "${key}"`);
@@ -75,11 +78,50 @@ export class EncryptedStore {
         try {
             plaintext = decipher.update(ciphertext, undefined, "utf8") + decipher.final("utf8");
         } catch {
-            // GCM auth tag mismatch — data has been tampered with
             throw new Error(`EncryptedStore: authentication failed for key "${key}" — possible tampering`);
         }
 
         return JSON.parse(plaintext) as T;
+    }
+
+    set(key: string, value: unknown): void {
+        const encoded = this.encrypt(value);
+        this.store.set(key, encoded);
+        if (this.adapter) {
+            // Fire-and-forget for sync API compat; callers needing guarantees use setAsync
+            void this.adapter.set(key, encoded);
+        }
+    }
+
+    async setAsync(key: string, value: unknown): Promise<void> {
+        const encoded = this.encrypt(value);
+        this.store.set(key, encoded);
+        if (this.adapter) {
+            await this.adapter.set(key, encoded);
+        }
+    }
+
+    get<T>(key: string): T | undefined {
+        const encoded = this.store.get(key);
+        if (!encoded) return undefined;
+        return this.decrypt<T>(key, encoded);
+    }
+
+    async getAsync<T>(key: string): Promise<T | undefined> {
+        // Try in-memory first
+        const memEncoded = this.store.get(key);
+        if (memEncoded) return this.decrypt<T>(key, memEncoded);
+
+        // Fall through to adapter
+        if (this.adapter) {
+            const encoded = await this.adapter.get(key);
+            if (!encoded) return undefined;
+            // Cache in memory
+            this.store.set(key, encoded);
+            return this.decrypt<T>(key, encoded);
+        }
+
+        return undefined;
     }
 
     append<T>(key: string, item: T): void {
@@ -94,6 +136,16 @@ export class EncryptedStore {
 
     delete(key: string): void {
         this.store.delete(key);
+        if (this.adapter) {
+            void this.adapter.delete(key);
+        }
+    }
+
+    async deleteAsync(key: string): Promise<void> {
+        this.store.delete(key);
+        if (this.adapter) {
+            await this.adapter.delete(key);
+        }
     }
 
     get size(): number {

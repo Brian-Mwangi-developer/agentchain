@@ -31,3 +31,14 @@ export class ChainAuthError extends Error {
         Object.setPrototypeOf(this, ChainAuthError.prototype);
     }
 }
+
+export function isChainAuthError(e: unknown): e is ChainAuthError {
+    if (e instanceof ChainAuthError) return true;
+    return (
+        typeof e === "object" &&
+        e !== null &&
+        (e as Record<string, unknown>)["name"] === "ChainAuthError" &&
+        typeof (e as Record<string, unknown>)["code"] === "string" &&
+        typeof (e as Record<string, unknown>)["message"] === "string"
+    );
+}

@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { EncryptedStore } from "../memory/encrypted-store.js";
 import { JtiCache } from "../memory/jti-cache.js";
 import { ChainAuthError } from "../errors/chain-error.js";
+import { isChainAuthError } from "../errors/chain-error.js";
 import { AgentIdentity } from "../identity/agent-identity.js";
 import { HostIdentity } from "../host/host-identity.js";
 import { TokenBuilder } from "../auth/token-builder.js";
@@ -1081,5 +1082,319 @@ describe("Auth latency overhead", () => {
 
         // Generous upper bound to accommodate slow CI environments
         assert.ok(avg < 50, `Average auth overhead ${avg.toFixed(2)}ms should be under 50ms`);
+    });
+});
+
+
+describe("isChainAuthError", () => {
+    it("returns true for a real ChainAuthError", () => {
+        const err = new ChainAuthError("token_invalid", "bad");
+        assert.ok(isChainAuthError(err));
+    });
+
+    it("returns true for a duck-typed error object (cross-module boundary)", () => {
+        const fake = { name: "ChainAuthError", code: "token_invalid", message: "bad" };
+        assert.ok(isChainAuthError(fake));
+    });
+
+    it("returns false for a plain Error", () => {
+        assert.ok(!isChainAuthError(new Error("nope")));
+    });
+
+    it("returns false for null/undefined", () => {
+        assert.ok(!isChainAuthError(null));
+        assert.ok(!isChainAuthError(undefined));
+    });
+});
+
+
+describe("enforceConstraints — required field enforcement", () => {
+    it("throws when a required field is missing", () => {
+        assert.throws(
+            () =>
+                enforceConstraints(
+                    { to: { in: ["+254700000001"] } },
+                    {},
+                    { type: "object", required: ["to"], properties: { to: { type: "string" } } }
+                ),
+            (err: unknown) => {
+                assert.ok(err instanceof ChainAuthError);
+                assert.equal(err.code, "constraint_violated");
+                assert.ok(err.message.includes("required"));
+                return true;
+            }
+        );
+    });
+
+    it("skips missing optional field (not in required)", () => {
+        assert.doesNotThrow(() =>
+            enforceConstraints(
+                { to: { in: ["+254700000001"] } },
+                {},
+                { type: "object", properties: { to: { type: "string" } } }
+            )
+        );
+    });
+
+    it("still enforces value when required field IS provided", () => {
+        assert.throws(
+            () =>
+                enforceConstraints(
+                    { to: { in: ["+254700000001"] } },
+                    { to: "+999999999" },
+                    { type: "object", required: ["to"], properties: { to: { type: "string" } } }
+                ),
+            (err: unknown) => {
+                assert.ok(err instanceof ChainAuthError);
+                assert.equal(err.code, "constraint_violated");
+                return true;
+            }
+        );
+    });
+
+    it("works without inputSchema (backward compat)", () => {
+        assert.doesNotThrow(() =>
+            enforceConstraints({ amount: { max: 100 } }, {})
+        );
+    });
+});
+
+describe("CapabilityRegistry — upsert/unregister", () => {
+    function makeCap(name: string, desc = "test") {
+        return {
+            name,
+            description: desc,
+            inputSchema: { type: "object" as const },
+            outputSchema: { type: "object" as const },
+            execute: async () => ({ ok: true }),
+        };
+    }
+
+    it("upsert() adds a new capability", () => {
+        const reg = new CapabilityRegistry();
+        reg.upsert(makeCap("read"));
+        assert.ok(reg.has("read"));
+    });
+
+    it("upsert() replaces an existing capability", () => {
+        const reg = new CapabilityRegistry();
+        reg.register(makeCap("read", "v1"));
+        reg.upsert(makeCap("read", "v2"));
+        assert.equal(reg.get("read")?.description, "v2");
+        assert.equal(reg.size, 1);
+    });
+
+    it("unregister() removes a capability", () => {
+        const reg = new CapabilityRegistry();
+        reg.register(makeCap("read"));
+        assert.ok(reg.unregister("read"));
+        assert.ok(!reg.has("read"));
+    });
+
+    it("unregister() returns false for non-existent capability", () => {
+        const reg = new CapabilityRegistry();
+        assert.ok(!reg.unregister("nope"));
+    });
+});
+
+
+describe("AgentIdentity.fromKeyPair()", () => {
+    it("restores agent identity with same thumbprint", async () => {
+        const store = EncryptedStore.create();
+        const host = await HostIdentity.create(
+            { name: "app", issuerUrl: "https://app.example.com" },
+            store
+        );
+        const original = await AgentIdentity.create(
+            {
+                agentName: "agent",
+                hostname: "h",
+                capabilities: ["read"],
+                hostThumbprint: host.thumbprint,
+                hostPublicKeyJwk: host.getPublicKeyJwk(),
+            },
+            store
+        );
+
+        const privateJwk = await original.exportPrivateKeyJwk();
+        const publicJwk = original.registration.publicKeyJwk;
+
+        const store2 = EncryptedStore.create();
+        const restored = await AgentIdentity.fromKeyPair(
+            privateJwk,
+            publicJwk,
+            original.registration,
+            store2
+        );
+
+        assert.equal(restored.thumbprint, original.thumbprint);
+        assert.equal(restored.agentId, original.agentId);
+        assert.equal(restored.hostThumbprint, original.hostThumbprint);
+    });
+});
+
+describe("AppChain.destroy()", () => {
+    it("destroy() can be called without error", async () => {
+        const chain = await AppChain.create({
+            providerName: "test",
+            issuer: "https://test.example.com",
+            capabilities: [{
+                name: "read",
+                description: "Read",
+                inputSchema: { type: "object" },
+                outputSchema: { type: "object" },
+                execute: async () => ({ ok: true }),
+            }],
+        });
+        assert.doesNotThrow(() => chain.destroy());
+    });
+});
+
+describe("AgentsChain.destroy()", () => {
+    it("destroy() can be called without error", async () => {
+        const chain = await AgentsChain.create({
+            agentName: "agent",
+            hostname: "app",
+            capabilities: ["read"],
+        });
+        assert.doesNotThrow(() => chain.destroy());
+    });
+});
+
+describe("AppChain — issuer config validation", () => {
+    const baseCap = {
+        name: "read",
+        description: "Read",
+        inputSchema: { type: "object" as const },
+        outputSchema: { type: "object" as const },
+        execute: async () => ({ ok: true }),
+    };
+
+    it("throws when neither issuer nor host.issuerUrl is set", async () => {
+        await assert.rejects(
+            () => AppChain.create({ providerName: "test", capabilities: [baseCap] }),
+            /either.*issuer.*or.*host.issuerUrl/i
+        );
+    });
+
+    it("throws when both issuer and host.issuerUrl differ", async () => {
+        await assert.rejects(
+            () =>
+                AppChain.create({
+                    providerName: "test",
+                    issuer: "https://a.com",
+                    host: { issuerUrl: "https://b.com" },
+                    capabilities: [baseCap],
+                }),
+            /both set but differ/
+        );
+    });
+
+    it("accepts issuer alone", async () => {
+        const chain = await AppChain.create({
+            providerName: "test",
+            issuer: "https://a.com",
+            capabilities: [baseCap],
+        });
+        assert.ok(chain.host.thumbprint.length > 0);
+    });
+
+    it("accepts host.issuerUrl alone", async () => {
+        const chain = await AppChain.create({
+            providerName: "test",
+            host: { issuerUrl: "https://a.com" },
+            capabilities: [baseCap],
+        });
+        assert.ok(chain.host.thumbprint.length > 0);
+    });
+});
+
+
+describe("AppChain — wrap() delegates to target", () => {
+    it("calls target method when Capability has no execute", async () => {
+        let targetCalled = false;
+        const service = {
+            read_data: async (params: unknown) => {
+                targetCalled = true;
+                const { id } = params as { id: string };
+                return { data: `from-target-${id}` };
+            },
+        };
+
+        const chain = await AppChain.create({
+            providerName: "data-service",
+            issuer: "https://data.example.com",
+            capabilities: [{
+                name: "read_data",
+                description: "Read data",
+                inputSchema: { type: "object" },
+                outputSchema: { type: "object" },
+                // No execute — should delegate to target
+            }],
+        });
+
+        const grants = [{ capability: "read_data", status: "active" as const }];
+        const secured = chain.wrap(service, grants);
+
+        const result = await (secured as Record<string, Function>)["read_data"]({ id: "42" });
+        assert.ok(targetCalled, "target method should have been called");
+        assert.deepEqual(result, { data: "from-target-42" });
+    });
+});
+
+describe("AppChain — constraint enforcement", () => {
+    it("blocks calls violating grant constraints", async () => {
+        const chain = await AppChain.create({
+            providerName: "sms-service",
+            issuer: "https://sms.example.com",
+            capabilities: [{
+                name: "send_sms",
+                description: "Send SMS",
+                inputSchema: {
+                    type: "object",
+                    required: ["to", "body"],
+                    properties: {
+                        to: { type: "string" },
+                        body: { type: "string" },
+                    },
+                },
+                outputSchema: { type: "object" },
+                execute: async (params) => ({ sent: true }),
+            }],
+        });
+
+        const grants = [{
+            capability: "send_sms",
+            status: "active" as const,
+            constraints: { to: { in: ["+254700000001"] } },
+        }];
+
+        const service = { send_sms: async () => ({ sent: true }) };
+        const secured = chain.wrap(service, grants);
+
+        // Allowed number
+        const r1 = await (secured as Record<string, Function>)["send_sms"]({ to: "+254700000001", body: "hi" });
+        assert.deepEqual(r1, { sent: true });
+
+        // Blocked number
+        await assert.rejects(
+            () => (secured as Record<string, Function>)["send_sms"]({ to: "+999999999", body: "hi" }),
+            (err: unknown) => {
+                assert.ok(err instanceof ChainAuthError);
+                assert.equal(err.code, "constraint_violated");
+                return true;
+            }
+        );
+
+        // Missing required field with constraint
+        await assert.rejects(
+            () => (secured as Record<string, Function>)["send_sms"]({ body: "hi" }),
+            (err: unknown) => {
+                assert.ok(err instanceof ChainAuthError);
+                assert.equal(err.code, "constraint_violated");
+                assert.ok(err.message.includes("required"));
+                return true;
+            }
+        );
     });
 });

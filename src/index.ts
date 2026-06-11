@@ -21,7 +21,7 @@ export type { AuditExporter, HttpAuditExporterConfig } from "./audit/audit-expor
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
-export { ChainAuthError } from "./errors/chain-error.js";
+export { ChainAuthError, isChainAuthError } from "./errors/chain-error.js";
 export type { ChainErrorCode } from "./errors/chain-error.js";
 
 // ─── Types: chain config ──────────────────────────────────────────────────────
@@ -66,6 +66,7 @@ export type {
 // ─── Types: JTI persistence adapter ──────────────────────────────────────────
 
 export type { JtiPersistenceAdapter } from "./memory/jti-cache.js";
+export type { StorePersistenceAdapter } from "./memory/encrypted-store.js";
 
 // ─── Types: token verifier config ────────────────────────────────────────────
 

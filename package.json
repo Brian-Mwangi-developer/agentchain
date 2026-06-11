@@ -1,13 +1,20 @@
 {
   "name": "agents-chain",
-  "version": "0.0.4",
+  "version": "0.0.45",
   "description": "Lightweight identity, auth, and audit layer for AI agent SDKs (OpenAI, Anthropic)",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
     }
   },
   "files": [
@@ -16,12 +23,14 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
+    "build": "tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
+    "dev": "tsc -p tsconfig.esm.json --watch",
     "prepublishOnly": "pnpm run build",
     "lint": "prettier --check .",
     "format": "prettier --write .",
-    "test": "tsc && node --test dist/__tests__/agents-chain.test.js"
+    "test": "pnpm run build && node --test dist/esm/__tests__/agents-chain.test.js",
+    "test:interop": "node --test scripts/test-cjs.cjs && node --test scripts/test-esm.mjs",
+    "test:all": "pnpm run test && pnpm run test:interop"
   },
   "keywords": [
     "ai",

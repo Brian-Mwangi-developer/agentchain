@@ -1,4 +1,5 @@
-/** Append-only encrypted audit log capped at 1000 entries. Secret keys in args are auto-redacted. */
+/** Append-only audit log capped at 1000 entries. Secret keys in args are auto-redacted.
+ *  Uses an in-memory buffer for O(1) appends; encrypts to store on drain/getAll. */
 
 import { generateId } from "../crypto/utils.js";
 import type { EncryptedStore } from "../memory/encrypted-store.js";
@@ -15,13 +16,11 @@ export type RecordDeniedOptions = {
     agentId: string;
     agentName: string;
     hostname: string;
-    /** The host thumbprint from the agent registration. */
     hostThumbprint: string;
     capability: string;
     args: Record<string, unknown>;
     reason: string;
     jti: string;
-    /** Milliseconds spent inside the auth pipeline before the denial. */
     authOverheadMs: number;
 };
 
@@ -31,12 +30,17 @@ export type RecordCallOptions = {
     result: Exclude<AuditResult, "denied">;
     durationMs: number;
     errorMessage?: string;
-    /** Milliseconds spent inside build+verify JWT pipeline. */
     authOverheadMs: number;
 };
 
 export class AuditLog {
-    constructor(private readonly store: EncryptedStore) {}
+    private readonly store: EncryptedStore;
+    private buffer: AuditEntry[] = [];
+    private loaded = false;
+
+    constructor(store: EncryptedStore) {
+        this.store = store;
+    }
 
     recordDenied(opts: RecordDeniedOptions): AuditEntry {
         const entry: AuditEntry = {
@@ -79,7 +83,8 @@ export class AuditLog {
     }
 
     getAll(): AuditEntry[] {
-        return this.store.get<AuditEntry[]>(STORE_KEY_LOG) ?? [];
+        this.ensureLoaded();
+        return [...this.buffer];
     }
 
     getByResult(result: AuditResult): AuditEntry[] {
@@ -91,25 +96,39 @@ export class AuditLog {
     }
 
     get count(): number {
-        return this.getAll().length;
+        this.ensureLoaded();
+        return this.buffer.length;
     }
 
     async drain(exporter?: AuditExporter): Promise<void> {
-        const entries = this.getAll();
+        this.ensureLoaded();
+        const entries = this.buffer;
         if (entries.length === 0) return;
         if (exporter) {
             await exporter.export(entries);
         }
+        this.buffer = [];
         this.store.set(STORE_KEY_LOG, [] as AuditEntry[]);
     }
 
-    private appendCapped(entry: AuditEntry): void {
-        const existing = this.store.get<AuditEntry[]>(STORE_KEY_LOG) ?? [];
-        if (existing.length >= MAX_ENTRIES) {
-            existing.shift(); // remove oldest
+    /** Flush the in-memory buffer to the encrypted store. */
+    flush(): void {
+        this.store.set(STORE_KEY_LOG, this.buffer);
+    }
+
+    private ensureLoaded(): void {
+        if (!this.loaded) {
+            this.buffer = this.store.get<AuditEntry[]>(STORE_KEY_LOG) ?? [];
+            this.loaded = true;
         }
-        existing.push(entry);
-        this.store.set(STORE_KEY_LOG, existing);
+    }
+
+    private appendCapped(entry: AuditEntry): void {
+        this.ensureLoaded();
+        if (this.buffer.length >= MAX_ENTRIES) {
+            this.buffer.shift();
+        }
+        this.buffer.push(entry);
     }
 }
 

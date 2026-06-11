@@ -11,3 +11,4 @@ agents-chain-dashboard.excalidraw
 
 # Compiled tests
 dist/__tests__/
+*.env*

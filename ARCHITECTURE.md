@@ -1,323 +1,322 @@
 # agents-chain — Architecture
 
-agents-chain is a **security layer** that wraps any app or service object with Ed25519-based identity, JWT-gated capability enforcement, constraint validation, and an encrypted audit trail. It has zero mandatory runtime dependencies — Redis, databases, and HTTP clients are injected by the user via adapter interfaces.
+This document describes the internal structure and data flows of the `agents-chain` package as of v0.0.45.
 
 ---
 
-## Package Internals
+## Module map
 
-```mermaid
-graph TB
-    subgraph agents-chain["agents-chain package"]
-        direction TB
-
-        subgraph Identity["Identity Layer"]
-            HI["HostIdentity\nEd25519 keypair\nSigns host+jwt tokens"]
-            AI["AgentIdentity\nEd25519 keypair\nStable agentId (thumbprint)"]
-        end
-
-        subgraph Auth["Auth Layer"]
-            TB2["TokenBuilder\nMints scoped agent+jwt\n(60s TTL, single-use JTI\nhostThumbprint embedded)"]
-            TV["TokenVerifier\n11-step JWT verification\n+ constraint enforcement"]
-            CS["enforceConstraints()\nmax / min / in / not_in\nexact equality"]
-            JC["JtiCache\nReplay protection\n90-second window\nBackground GC timer (45s)"]
-        end
-
-        subgraph AppLayer["App Layer"]
-            CR["CapabilityRegistry\nname → Capability map\nBuilds well-known config"]
-            WA["wrapApp()\nJS Proxy intercepts\nmethod calls on any object"]
-        end
-
-        subgraph Memory["Memory Layer"]
-            ES["EncryptedStore\nAES-256-GCM\nin-memory KV"]
-        end
-
-        subgraph Audit["Audit Layer"]
-            AL["AuditLog\nAppend-only encrypted log\nCapped at 1000 entries\nrecords authOverheadMs"]
-            AE["AuditExporter\nConsoleAuditExporter\nHttpAuditExporter"]
-        end
-
-        subgraph Chains["Entry Points"]
-            AC["AgentsChain\nWraps OpenAI / Anthropic SDKs"]
-            APC["AppChain\nWraps any service object"]
-        end
-    end
-
-    APC --> HI
-    APC --> CR
-    APC --> WA
-    APC --> AI
-    APC --> TB2
-    APC --> TV
-    APC --> AL
-
-    AC --> AI
-    AC --> TB2
-    AC --> TV
-    AC --> AL
-
-    WA --> TB2
-    WA --> TV
-    WA --> CS
-    WA --> AL
-    WA --> CR
-
-    TV --> JC
-    TV --> CS
-
-    AI --> ES
-    HI --> ES
-    AL --> ES
-    AL --> AE
+```
+agents-chain/
+├── chain.ts                  AgentsChain, AppChain (main entry points)
+├── index.ts                  Public re-exports
+│
+├── host/
+│   └── host-identity.ts      HostIdentity — Ed25519 keypair, thumbprint, signs host/registration JWTs
+│
+├── identity/
+│   └── agent-identity.ts     AgentIdentity — Ed25519 keypair, agent registration, capability names
+│
+├── auth/
+│   ├── token-builder.ts      TokenBuilder — mints signed 60s capability JWTs
+│   ├── token-verifier.ts     TokenVerifier — 11-step pipeline (decode → sig → chain → JTI → grant)
+│   └── constraints.ts        enforceConstraints() — field-level validation against GrantConstraints
+│
+├── app/
+│   ├── capability-registry.ts  CapabilityRegistry — name → Capability map, well-known config builder
+│   └── app-wrapper.ts          wrapApp() — JavaScript Proxy interceptor, dispatches to execute or target method
+│
+├── audit/
+│   ├── audit-log.ts           AuditLog — in-memory buffer (O(1) append, cap 1000), AES-256-GCM flush
+│   └── audit-exporter.ts      AuditExporter interface, ConsoleAuditExporter, HttpAuditExporter
+│
+├── memory/
+│   ├── encrypted-store.ts     EncryptedStore — AES-256-GCM Map<string,string>, optional persistence adapter
+│   └── jti-cache.ts           JtiCache — 90s replay window, background GC, optional Redis adapter
+│
+├── crypto/
+│   ├── ed25519.ts             generateKeyPair, sign/verify JWT, JWK import/export, thumbprint
+│   └── utils.ts               generateId, generateAgentId, base64UrlEncode/Decode
+│
+├── errors/
+│   └── chain-error.ts         ChainAuthError, isChainAuthError(), ChainErrorCode enum
+│
+├── wrappers/
+│   ├── openai-wrapper.ts      wrapOpenAI() — Proxy over OpenAI SDK, maps method paths → capability strings
+│   └── anthropic-wrapper.ts   wrapAnthropic() — Proxy over Anthropic SDK, maps method paths → capability strings
+│
+└── types/
+    ├── capabilities.ts        Capability, AgentContext, GrantConstraints, JsonSchemaObject
+    ├── chain.ts               AgentConfig, AppChainConfig, ChainStats, AuditSnapshot
+    ├── identity.ts            RegisteredAgent, CapabilityGrant, CapabilityConstraints
+    ├── audit.ts               AuditEntry, AuditResult
+    └── protocol.ts            HostJwtClaims, AgentJwtClaims, ResolvedGrant, AgentConfiguration
 ```
 
 ---
 
-## Integration Flow — Wrapping an App
+## Shared state — EncryptedStore
 
-This shows how a developer integrates agents-chain in front of their own service (e.g. a billing service).
+All chain state flows through one shared `EncryptedStore` instance created in `AppChain.create()` or `AgentsChain.create()`. Nothing is siloed.
 
-```mermaid
-sequenceDiagram
-    actor Dev as Developer
-    participant AC as AppChain.create()
-    participant CR as CapabilityRegistry
-    participant HI as HostIdentity
-    participant WA as wrapApp() Proxy
-    participant TV as TokenVerifier
-    participant CS as enforceConstraints()
-    participant CAP as capability.execute()
-    participant LOG as AuditLog
+```
+AppChain.create()
+    │
+    └─► EncryptedStore.create(encryptionKey?)
+            │
+            ├─► HostIdentity    (persists host registration under "host:*" keys)
+            ├─► AgentIdentity   (persists agent registration under "agent:*" keys)
+            └─► AuditLog        (persists encrypted audit buffer under "audit:log" key)
+```
 
-    Dev->>AC: AppChain.create({ providerName, issuer, capabilities[], grantResolver? })
-    AC->>HI: HostIdentity.create({ name, issuerUrl })
-    Note over HI: Generates Ed25519 keypair\nComputes JWK thumbprint → hostId
-    AC->>CR: register(capability) for each capability
-    AC-->>Dev: chain (AppChain instance)
+An optional `StorePersistenceAdapter` (Redis, SQLite, etc.) can be injected — `EncryptedStore` delegates `get/set/delete` to it so state survives process restarts.
 
-    Dev->>AC: chain.wrap(billingService, agentGrants[])
-    AC->>WA: wrapApp(target, registry, ctx)
-    WA-->>Dev: secured (Proxy of billingService)
+---
 
-    Dev->>WA: secured.createInvoice({ customerId, amount })
-    Note over WA: Proxy intercepts method call\nLooks up "createInvoice" in registry
+## AppChain creation flow
+
+```
+AppChain.create(config)
+    │
+    ├── 1. EncryptedStore.create()           — AES-256-GCM in-memory store (+ optional adapter)
+    ├── 2. JtiCache(jtiAdapter?)             — 90s replay window (+ optional Redis adapter)
+    │
+    ├── 3a. HostIdentity.fromKeyPair()       — if config.host.privateKeyJwk provided
+    │   OR
+    │   3b. HostIdentity.create()            — generates new Ed25519 keypair
+    │
+    ├── 4a. AgentIdentity.fromKeyPair()      — if config.agent.privateKeyJwk provided
+    │   OR
+    │   4b. AgentIdentity.create()           — generates new Ed25519 keypair, links to host thumbprint
+    │
+    ├── 5. TokenBuilder(identity)            — builds signed JWTs using agent private key
+    ├── 6. TokenVerifier(identity, jtiCache) — runs 11-step verification pipeline
+    ├── 7. AuditLog(store)                   — in-memory buffer backed by EncryptedStore
+    │
+    └── 8. CapabilityRegistry
+            └── registry.register(cap) for each capability in config.capabilities
 ```
 
 ---
 
-## Per-Call Security Flow
+## Per-call security pipeline — `chain.wrap(service, grants)`
 
-Every intercepted capability call goes through this 11-step verification pipeline.
-
-```mermaid
-flowchart TD
-    CALL["secured.createInvoice(args)"]
-    BUILD["TokenBuilder.build('createInvoice')\nMint scoped agent+jwt\n{ iss: thumbprint, sub: agentId,\n  aud: 'createInvoice',\n  hostThumbprint: hostId,\n  iat, exp: now+60, jti: random }"]
-    D1{{"Step 1-2\nDecode JWT header + payload\nConfirm typ = 'agent+jwt'"}}
-    D2{{"Step 3\nsub === registered agentId?"}}
-    D3{{"Step 4\niss === public key thumbprint?"}}
-    D4{{"Step 5\naud === requested capability?"}}
-    D5{{"Step 6 (NEW)\nhostThumbprint claim matches\nagent's registered Host?"}}
-    D6{{"Step 7\nEd25519 signature valid?"}}
-    D7{{"Step 8\nexp/iat temporal check\n+ clock skew tolerance"}}
-    D8{{"Step 9\nJTI not seen in\n90-second window?"}}
-    D9{{"Step 10\nAgent holds active grant\nfor this capability?\n(grantResolver or in-memory)"}}
-    D10{{"Step 11\nGrant not expired?\n+ Constraints satisfied?"}}
-    EXEC["capability.execute(args, agentContext)\nUser-defined execution"]
-    LOG_OK["AuditLog.recordCall()\nresult: 'success'\nauthOverheadMs recorded"]
-    LOG_ERR["AuditLog.recordCall()\nresult: 'error'"]
-    LOG_DENY["AuditLog.recordDenied()\nresult: 'denied'"]
-    THROW_AUTH["throw ChainAuthError"]
-    THROW_EXEC["re-throw execution error"]
-
-    CALL --> BUILD
-    BUILD --> D1
-    D1 -->|fail| THROW_AUTH
-    D1 -->|pass| D2
-    D2 -->|fail: agent_not_found| THROW_AUTH
-    D2 -->|pass| D3
-    D3 -->|fail: token_invalid| THROW_AUTH
-    D3 -->|pass| D4
-    D4 -->|fail: capability_denied| THROW_AUTH
-    D4 -->|pass| D5
-    D5 -->|fail: token_invalid| THROW_AUTH
-    D5 -->|pass| D6
-    D6 -->|fail: token_invalid| THROW_AUTH
-    D6 -->|pass| D7
-    D7 -->|fail: token_expired / token_invalid| THROW_AUTH
-    D7 -->|pass| D8
-    D8 -->|fail: token_replayed| THROW_AUTH
-    D8 -->|pass| D9
-    D9 -->|fail: capability_denied| THROW_AUTH
-    D9 -->|pass| D10
-    D10 -->|fail: capability_denied / constraint_violated| THROW_AUTH
-    D10 -->|pass| EXEC
-    EXEC -->|success| LOG_OK
-    EXEC -->|throws| LOG_ERR
-    LOG_ERR --> THROW_EXEC
-    THROW_AUTH --> LOG_DENY
-
-    style CALL fill:#1e293b,color:#f8fafc
-    style D5 fill:#1e40af,color:#eff6ff
-    style EXEC fill:#166534,color:#f0fdf4
-    style LOG_OK fill:#166534,color:#f0fdf4
-    style LOG_ERR fill:#7f1d1d,color:#fef2f2
-    style LOG_DENY fill:#7f1d1d,color:#fef2f2
-    style THROW_AUTH fill:#7f1d1d,color:#fef2f2
-    style THROW_EXEC fill:#7f1d1d,color:#fef2f2
+```
+caller → secured.someMethod(args)
+    │
+    │   [JavaScript Proxy — app-wrapper.ts]
+    │
+    ├── TokenBuilder.build(capabilityName)
+    │       └── signJwt({ sub: agentId, iss: thumbprint, aud: capability, hostThumbprint, jti, exp })
+    │
+    ├── TokenVerifier.verify(token, capability, grants)
+    │       │
+    │       │   Step 1–2  decode JWT, confirm typ = "agent+jwt"
+    │       │   Step 3    sub === identity.agentId
+    │       │   Step 4    iss === identity.thumbprint
+    │       │   Step 5    aud === capability
+    │       │   Step 6    token.hostThumbprint === identity.registration.hostThumbprint
+    │       │   Step 7    verifyJwtSignature(token, agent public key)
+    │       │   Step 8    exp/iat temporal check (±30s clock skew)
+    │       │   Step 9    JtiCache.has(jti) → throw token_replayed; else JtiCache.set(jti, 90s)
+    │       │   Step 10   grants.find(g => g.capability === cap && g.status === "active")
+    │       │   Step 11   grant.expiresAt > Date.now()
+    │       │
+    │       └── returns VerifiedCallContext { agentId, thumbprint, hostThumbprint, capability, jti }
+    │
+    ├── enforceConstraints(grant.constraints, args, capability.inputSchema)
+    │       └── for each constrained field:
+    │               - if field in inputSchema.required and value === undefined → constraint_violated
+    │               - max/min/in/not_in/exact equality checks on present values
+    │
+    ├── resolve executeFn
+    │       ├── if capability.execute defined  → capability.execute(args, agentContext)
+    │       └── if target has method of same name → target[methodName](args)   [after auth gate]
+    │
+    ├── executeFn(args)
+    │
+    └── AuditLog.recordCall({ context, args, result, durationMs, authOverheadMs })
+            └── on ChainAuthError → AuditLog.recordDenied(...)
 ```
 
 ---
 
-## Host → Agent Delegation Chain
+## Host JWT flow
 
-Every agent is cryptographically linked to its Host. This closes the rogue-agent gap — a self-issued agent cannot impersonate a registered one because the verifier checks `hostThumbprint` at step 6.
+The `HostIdentity` keypair is the cryptographic anchor. Its thumbprint (JWK SHA-256) is embedded in every agent registration and every capability JWT so the verifier can trace the full delegation chain.
 
-```mermaid
-flowchart LR
-    subgraph HostLayer["Host Layer"]
-        HI["HostIdentity\nEd25519 keypair\nhostId = JWK thumbprint"]
-    end
+```
+HostIdentity
+    │
+    ├── getPublicKeyJwk()           → raw JWK (embedded in agent registration)
+    ├── thumbprint                  → SHA-256 of JWK (stable hostId)
+    ├── signHostJwt()               → host+jwt signed with host private key
+    └── signAgentRegistrationJwt(agentPublicKeyJwk)
+            └── { typ: "host+jwt", sub: hostThumbprint, aud: agentThumbprint,
+                  hostPublicKeyJwk, exp: +24h }
 
-    subgraph AgentLayer["Agent Layer"]
-        AI["AgentIdentity\nEd25519 keypair\nregistration embeds:\n- hostThumbprint\n- hostPublicKeyJwk"]
-    end
+AgentIdentity.registration
+    ├── agentId                     → agent's JWK thumbprint
+    ├── publicKeyJwk                → agent's Ed25519 public key
+    ├── hostThumbprint              → copied from HostIdentity at registration time
+    └── hostPublicKeyJwk            → copied from HostIdentity at registration time
 
-    subgraph TokenLayer["Token Layer (per-call)"]
-        JWT["agent+jwt\nclaims include:\n- iss: agentThumbprint\n- sub: agentId\n- hostThumbprint: hostId"]
-    end
-
-    subgraph VerifyLayer["Verification (step 6)"]
-        CHECK["jwt.hostThumbprint\n===\nagentIdentity.hostThumbprint?"]
-    end
-
-    HI -->|"thumbprint + publicKeyJwk\nembedded at registration"| AI
-    AI -->|"hostThumbprint\nincluded in every token"| JWT
-    JWT -->|"checked by TokenVerifier"| CHECK
-    CHECK -->|"mismatch → token_invalid"| DENY["ChainAuthError\ntoken_invalid"]
-    CHECK -->|"match → proceed"| NEXT["Steps 7-11"]
-
-    style HI fill:#1e40af,color:#eff6ff
-    style AI fill:#1e40af,color:#eff6ff
-    style JWT fill:#1e293b,color:#f8fafc
-    style CHECK fill:#166534,color:#f0fdf4
-    style DENY fill:#7f1d1d,color:#fef2f2
+Capability JWT (agent+jwt)
+    ├── sub: agentId
+    ├── iss: agentThumbprint
+    ├── aud: capabilityName
+    ├── hostThumbprint              → verified in Step 6
+    ├── jti                         → random ID, cached 90s for replay protection
+    └── exp: now + 60s
 ```
 
 ---
 
-## Host JWT Flow — Agent Registration
+## Identity restore flow (across restarts)
 
-The `HostIdentity` is used to sign management JWTs when registering agents against an agent-auth compliant server.
+```
+First boot
+    AppChain.create({ providerName, issuer, capabilities })
+        → HostIdentity.create()    → generates { privateKey, publicKey }
+        → AgentIdentity.create()   → generates { privateKey, publicKey }
 
-```mermaid
-sequenceDiagram
-    actor Dev as Developer
-    participant HI as HostIdentity
-    participant AuthServer as Agent-Auth Server
+    Export for persistence:
+        host.exportPrivateKeyJwk() → hostPrivateKeyJwk  (store in secrets manager)
+        host.getPublicKeyJwk()     → hostPublicKeyJwk
 
-    Dev->>HI: chain.host.signAgentRegistrationJwt(agentPublicKeyJwk)
-    Note over HI: Signs host+jwt\n{ iss: hostId, aud: issuerUrl,\n  agent_public_key: JWK,\n  iat, exp: now+60, jti }
-    HI-->>Dev: signed host+jwt (string)
-
-    Dev->>AuthServer: POST /agent/register\nAuthorization: Bearer <host+jwt>
-    AuthServer-->>Dev: { agentId, grants[] }
-
-    Note over Dev: Developer now has agentId + grants\nPass grants[] to chain.wrap(service, grants)
+Subsequent boots
+    AppChain.create({
+        ...,
+        host:  { privateKeyJwk, publicKeyJwk },
+        agent: { agentId, privateKeyJwk, publicKeyJwk }
+    })
+        → HostIdentity.fromKeyPair()    → restores same thumbprint / hostId
+        → AgentIdentity.fromKeyPair()   → restores same agentId
 ```
 
 ---
 
-## Well-Known Discovery
+## AuditLog internals
 
-```mermaid
-sequenceDiagram
-    actor Agent as External Agent
-    participant App as Developer's App
-    participant AC as AppChain
-    participant CR as CapabilityRegistry
+```
+AuditLog
+    ├── buffer: AuditEntry[]         ← in-memory, never encrypted individually
+    ├── loaded: boolean              ← lazy-load flag
+    │
+    ├── ensureLoaded()               ← decrypts from EncryptedStore once on first read
+    ├── appendCapped(entry)          ← O(1) push, evicts oldest when buffer.length > 1000
+    ├── getAll()                     ← returns buffer (always in-memory, no I/O)
+    ├── flush()                      ← encrypts entire buffer to EncryptedStore
+    └── drain(exporter?)             ← calls exporter.export(entries), then clears buffer
+```
 
-    Agent->>App: GET /.well-known/agent-configuration
-    App->>AC: chain.getWellKnownConfig()
-    AC->>CR: buildWellKnownConfig(issuer, providerName)
-    CR-->>AC: AgentConfiguration\n{ version, provider_name, issuer,\n  algorithms: ["Ed25519"],\n  endpoints: { register, capabilities,\n    execute, status, revoke, ... },\n  default_capabilities: [...] }
-    AC-->>App: AgentConfiguration
-    App-->>Agent: 200 OK — JSON
+Every `recordCall()` / `recordDenied()` appends to `this.buffer` directly — there is no per-append encrypt/decrypt cycle. The buffer is flushed to `EncryptedStore` only when `flush()` or `drain()` is called.
+
+Argument sanitization runs before any entry is stored:
+
+```
+sanitizeArgs(args)
+    └── for each key in args:
+            if key matches /key|secret|token|password|auth|credential|bearer/ (case-insensitive)
+                → replace value with "[REDACTED]"
 ```
 
 ---
 
-## Persistence Adapters — Plugging In Redis
+## JTI cache internals
 
-agents-chain defaults to in-memory state. For production deployments, plug in your own Redis client via two adapter interfaces — the package never imports a Redis client.
+```
+JtiCache
+    ├── cache: Map<jti, expiresAt>
+    ├── GC timer: setInterval(evictExpired, 45s).unref()   ← does not block process exit
+    │
+    ├── has(jti)       → checks local cache + optional adapter.has(jti)
+    ├── set(jti, ttl)  → cache.set(jti, now+ttl) + optional adapter.set(jti, ttl)
+    ├── evictExpired() → removes entries where expiresAt < now
+    └── destroy()      → clearInterval(timer), cache.clear()
+```
 
-```mermaid
-graph LR
-    subgraph Default["Default (in-memory)"]
-        JC_MEM["JtiCache\nin-memory Map\nresets on restart"]
-        LOG_MEM["AuditLog\nEncryptedStore\nin-memory"]
-    end
+`destroy()` must be called on graceful shutdown (and in tests) to stop the GC timer.
 
-    subgraph WithAdapters["With Adapters (production)"]
-        JC_REDIS["JtiCache(redisAdapter)\nJtiPersistenceAdapter\n{ has(key), set(key, ttlMs) }"]
-        LOG_HTTP["AuditLog.drain()\nHttpAuditExporter\nPOST /audit/ingest"]
-        GR["grantResolver\n(agentId, capability) =>\nPromise<ResolvedGrant | null>"]
-    end
+---
 
-    subgraph UserProvided["User provides"]
-        REDIS["ioredis / node-redis\nclient instance"]
-        DB["Your DB / API\nclient instance"]
-        INGEST["Any HTTP endpoint\nor hosted audit service"]
-    end
+## Capability registry internals
 
-    JC_REDIS -->|implements| REDIS
-    LOG_HTTP -->|POSTs to| INGEST
-    GR -->|queries| DB
+```
+CapabilityRegistry
+    ├── caps: Map<name, Capability>
+    │
+    ├── register(cap)        → throws if name already exists
+    ├── upsert(cap)          → replaces silently (runtime hot-reload)
+    ├── get(name)            → returns Capability or undefined
+    ├── unregister(name)     → removes, returns true if existed
+    ├── list()               → returns all Capability values
+    └── buildWellKnownConfig(issuerUrl, providerName, prefix?, opts?)
+            └── returns AgentConfiguration for /.well-known/agent-configuration
 ```
 
 ---
 
-## Complete Integration Example
+## Persistence adapter injection points
 
-```mermaid
-graph TD
-    subgraph YourApp["Your Application"]
-        SVC["billingService\n(your existing object)"]
-        ROUTES["Express Routes"]
-        WK["Well-Known Endpoint\nGET /.well-known/agent-configuration"]
-    end
+```
+AppChain.create(config)
+    │
+    ├── config.encryptionKey      → AES-256-GCM key for EncryptedStore (hex or base64)
+    │
+    ├── config.storeAdapter       → StorePersistenceAdapter
+    │       interface StorePersistenceAdapter {
+    │           get(key: string): Promise<string | undefined>
+    │           set(key: string, value: string): Promise<void>
+    │           delete(key: string): Promise<void>
+    │       }
+    │
+    ├── config.jtiAdapter         → JtiPersistenceAdapter
+    │       interface JtiPersistenceAdapter {
+    │           has(key: string): Promise<boolean>
+    │           set(key: string, ttlMs: number): Promise<void>
+    │       }
+    │
+    └── config.grantResolver      → async (agentId, capability) => ResolvedGrant | undefined
+            used by TokenVerifier to fetch grants from your DB instead of from the passed-in array
+```
 
-    subgraph ChainSetup["AppChain Setup"]
-        AC["AppChain.create({\n  providerName: 'billing',\n  issuer: 'https://billing.co',\n  capabilities: [...],\n  grantResolver: db.getGrant\n})"]
-        SECURED["chain.wrap(billingService, grants)\n→ secured (Proxy)"]
-    end
+---
 
-    subgraph Security["agents-chain Security Layer"]
-        PROXY["JS Proxy Intercept"]
-        JWT_FLOW["11-Step JWT Verification"]
-        CONSTRAINT["Constraint Enforcement"]
-        AUDIT["Encrypted Audit Log"]
-    end
+## Build outputs
 
-    subgraph Storage["Optional External Storage"]
-        REDIS2["Redis\nJTI replay protection"]
-        AUDITDB["Audit Ingest\nHttpAuditExporter"]
-        GRANTDB["Grant Store\ngrantResolver callback"]
-    end
+The package ships two compiled outputs selected automatically by Node.js via the `exports` map:
 
-    ROUTES --> SECURED
-    SECURED --> PROXY
-    PROXY --> JWT_FLOW
-    JWT_FLOW --> CONSTRAINT
-    CONSTRAINT --> SVC
-    SVC --> AUDIT
-    AUDIT -->|drain()| AUDITDB
-    JWT_FLOW -->|JtiCache| REDIS2
-    JWT_FLOW -->|grantResolver| GRANTDB
-    WK --> AC
+```
+dist/
+├── esm/
+│   ├── index.js          ESM (import / type: "module" consumers)
+│   └── index.d.ts        TypeScript declarations
+└── cjs/
+    ├── package.json      { "type": "commonjs" }  ← required for .js to load as CJS
+    ├── index.js          CommonJS (require() consumers)
+    └── index.d.ts
+```
 
-    style PROXY fill:#1e40af,color:#eff6ff
-    style JWT_FLOW fill:#1e40af,color:#eff6ff
-    style CONSTRAINT fill:#1e40af,color:#eff6ff
-    style AUDIT fill:#1e40af,color:#eff6ff
+```json
+"exports": {
+  ".": {
+    "import":  { "types": "./dist/esm/index.d.ts", "default": "./dist/esm/index.js" },
+    "require": { "types": "./dist/cjs/index.d.ts", "default": "./dist/cjs/index.js" }
+  }
+}
+```
+
+---
+
+## Test structure
+
+```
+src/__tests__/agents-chain.test.ts    20 suites, 85 unit + integration tests (Node built-in test runner)
+scripts/test-cjs.cjs                  27 CJS artifact tests  (require from dist/cjs)
+scripts/test-esm.mjs                  28 ESM artifact tests  (import from dist/esm)
+
+pnpm test             build + unit suite (85 tests)
+pnpm test:interop     CJS + ESM artifact tests (55 tests, no rebuild)
+pnpm test:all         both of the above
 ```

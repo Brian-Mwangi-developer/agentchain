@@ -38,5 +38,6 @@ export type Capability<TInput = unknown, TOutput = unknown> = {
     description: string;
     inputSchema: JsonSchemaObject;
     outputSchema: JsonSchemaObject;
-    execute: (params: TInput, context: AgentContext) => Promise<TOutput>;
+    /** The implementation. If omitted, wrap() delegates to the target object's method of the same name. */
+    execute?: (params: TInput, context: AgentContext) => Promise<TOutput>;
 };

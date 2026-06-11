@@ -14,6 +14,15 @@ export class CapabilityRegistry {
         return this;
     }
 
+    upsert<TIn, TOut>(cap: Capability<TIn, TOut>): this {
+        this.caps.set(cap.name, cap as Capability);
+        return this;
+    }
+
+    unregister(name: string): boolean {
+        return this.caps.delete(name);
+    }
+
     get(name: string): Capability | undefined {
         return this.caps.get(name);
     }

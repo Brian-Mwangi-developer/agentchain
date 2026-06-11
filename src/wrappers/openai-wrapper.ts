@@ -1,10 +1,12 @@
 /** OpenAI SDK Proxy wrapper. Intercepts known method paths and gates them through auth + audit. */
 
 import { ChainAuthError } from "../errors/chain-error.js";
+import { enforceConstraints } from "../auth/constraints.js";
 import type { TokenBuilder } from "../auth/token-builder.js";
 import type { TokenVerifier } from "../auth/token-verifier.js";
 import type { AuditLog } from "../audit/audit-log.js";
 import type { AgentIdentity } from "../identity/agent-identity.js";
+import type { ResolvedGrant } from "../types/protocol.js";
 
 const METHOD_CAPABILITY_MAP: Record<string, string> = {
     "chat.completions.create": "chat.completion",
@@ -21,6 +23,7 @@ type InterceptContext = {
     builder: TokenBuilder;
     verifier: TokenVerifier;
     log: AuditLog;
+    grants?: ResolvedGrant[];
 };
 
 export function wrapOpenAI<T extends object>(client: T, ctx: InterceptContext): T {
@@ -70,6 +73,15 @@ function createInterceptedMethod(
             jti = claims.jti;
             const verified = await ctx.verifier.verify(token, capability);
             const authOverheadMs = Date.now() - authStart;
+
+            if (ctx.grants) {
+                const grant = ctx.grants.find(
+                    (g) => g.capability === capability && g.status === "active"
+                );
+                if (grant?.constraints) {
+                    enforceConstraints(grant.constraints, callArgs);
+                }
+            }
 
             const callStart = Date.now();
             let result: unknown;

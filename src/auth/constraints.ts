@@ -1,19 +1,25 @@
 /** Validates call args against grant constraints (max/min/in/not_in/exact). Throws constraint_violated on failure. */
 
 import { ChainAuthError } from "../errors/chain-error.js";
-import type { GrantConstraints, ConstraintValue, ConstraintOperator, ConstraintPrimitive } from "../types/capabilities.js";
+import type { GrantConstraints, ConstraintValue, ConstraintOperator, ConstraintPrimitive, JsonSchemaObject } from "../types/capabilities.js";
 
 export function enforceConstraints(
     constraints: GrantConstraints,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    inputSchema?: JsonSchemaObject
 ): void {
     const violations: string[] = [];
+    const requiredFields = inputSchema?.required ?? [];
 
     for (const [field, constraint] of Object.entries(constraints)) {
         const value = args[field];
 
-        // Field not present in args — skip (constraint only applies when field is provided)
-        if (value === undefined) continue;
+        if (value === undefined) {
+            if (requiredFields.includes(field)) {
+                violations.push(`field "${field}" is required but was not provided`);
+            }
+            continue;
+        }
 
         const violation = checkConstraint(field, value, constraint);
         if (violation) violations.push(violation);

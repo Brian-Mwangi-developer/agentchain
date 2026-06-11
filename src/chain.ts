@@ -23,6 +23,7 @@ export class AgentsChain {
     private readonly builder: TokenBuilder;
     private readonly verifier: TokenVerifier;
     private readonly log: AuditLog;
+    private readonly jtiCache: JtiCache;
     readonly host: HostIdentity;
     private readonly defaultExporter?: AuditExporter;
 
@@ -33,6 +34,7 @@ export class AgentsChain {
         builder: TokenBuilder,
         verifier: TokenVerifier,
         log: AuditLog,
+        jtiCache: JtiCache,
         defaultExporter?: AuditExporter
     ) {
         this.store = store;
@@ -41,6 +43,7 @@ export class AgentsChain {
         this.builder = builder;
         this.verifier = verifier;
         this.log = log;
+        this.jtiCache = jtiCache;
         this.defaultExporter = defaultExporter;
     }
 
@@ -71,9 +74,12 @@ export class AgentsChain {
         const verifier = new TokenVerifier(identity, jtiCache);
         const log = new AuditLog(store);
 
-        return new AgentsChain(store, host, identity, builder, verifier, log, config.auditExporter);
+        return new AgentsChain(store, host, identity, builder, verifier, log, jtiCache, config.auditExporter);
     }
 
+    destroy(): void {
+        this.jtiCache.destroy();
+    }
 
     openai<T extends object>(client: T): T {
         return wrapOpenAI(client, {
@@ -155,6 +161,7 @@ export class AppChain {
     private readonly builder: TokenBuilder;
     private readonly verifier: TokenVerifier;
     private readonly log: AuditLog;
+    private readonly jtiCache: JtiCache;
     private readonly exporter?: AuditExporter;
 
     private constructor(
@@ -164,6 +171,7 @@ export class AppChain {
         builder: TokenBuilder,
         verifier: TokenVerifier,
         log: AuditLog,
+        jtiCache: JtiCache,
         exporter?: AuditExporter
     ) {
         this.host = host;
@@ -172,37 +180,80 @@ export class AppChain {
         this.builder = builder;
         this.verifier = verifier;
         this.log = log;
+        this.jtiCache = jtiCache;
         this.exporter = exporter;
     }
 
     static async create(config: AppChainConfig): Promise<AppChain> {
+        const issuerUrl = config.host?.issuerUrl ?? config.issuer;
+        if (!issuerUrl) {
+            throw new Error("AppChain.create: either `issuer` or `host.issuerUrl` must be provided");
+        }
+        if (config.issuer && config.host?.issuerUrl && config.issuer !== config.host.issuerUrl) {
+            throw new Error(
+                `AppChain.create: \`issuer\` ("${config.issuer}") and \`host.issuerUrl\` ("${config.host.issuerUrl}") ` +
+                `are both set but differ. Use one or the other, not both.`
+            );
+        }
+
         // Single shared EncryptedStore for all chain state (host, agent, audit log)
         const store = EncryptedStore.create(config.encryptionKey);
         const jtiCache = new JtiCache(config.jtiAdapter);
 
-        // Create Host identity FIRST — agent registration references it.
-        // Uses the shared store (not its own isolated store as it did before).
-        const host = await HostIdentity.create(
-            {
-                name: config.host?.name ?? config.providerName,
-                issuerUrl: config.host?.issuerUrl ?? config.issuer,
-            },
-            store
-        );
+        const hostConfig = {
+            name: config.host?.name ?? config.providerName,
+            issuerUrl,
+        };
 
-        // Create the app's own agent identity, linked to the Host above.
-        // hostThumbprint + hostPublicKeyJwk are embedded in every token this
-        // agent signs, closing the rogue-agent gap.
-        const identity = await AgentIdentity.create(
-            {
+        // Restore or create Host identity
+        const host = (config.host?.privateKeyJwk && config.host?.publicKeyJwk)
+            ? await HostIdentity.fromKeyPair(
+                  config.host.privateKeyJwk,
+                  config.host.publicKeyJwk,
+                  hostConfig,
+                  store
+              )
+            : await HostIdentity.create(hostConfig, store);
+
+        // Restore or create Agent identity, linked to the Host above.
+        let identity: AgentIdentity;
+        if (config.agent?.privateKeyJwk && config.agent?.publicKeyJwk) {
+            if (!config.agent.agentId) {
+                throw new Error("AppChain.create: `agent.agentId` is required when restoring from JWKs");
+            }
+            // Restoring persisted agent — rebuild registration from config + host
+            const registration: import("./types/identity.js").RegisteredAgent = {
+                agentId: config.agent.agentId,
                 agentName: config.providerName,
                 hostname: config.providerName,
-                capabilities: config.capabilities.map((c) => c.name),
+                publicKeyJwk: config.agent.publicKeyJwk,
+                thumbprint: "", // will be overwritten
+                capabilities: config.capabilities.map((c) => ({
+                    capability: c.name,
+                    grantedAt: Date.now(),
+                })),
+                registeredAt: Date.now(),
                 hostThumbprint: host.thumbprint,
                 hostPublicKeyJwk: host.getPublicKeyJwk(),
-            },
-            store
-        );
+            };
+            identity = await AgentIdentity.fromKeyPair(
+                config.agent.privateKeyJwk,
+                config.agent.publicKeyJwk,
+                registration,
+                store
+            );
+        } else {
+            identity = await AgentIdentity.create(
+                {
+                    agentName: config.providerName,
+                    hostname: config.providerName,
+                    capabilities: config.capabilities.map((c) => c.name),
+                    hostThumbprint: host.thumbprint,
+                    hostPublicKeyJwk: host.getPublicKeyJwk(),
+                },
+                store
+            );
+        }
 
         const builder = new TokenBuilder(identity);
         const verifier = new TokenVerifier(identity, jtiCache, {
@@ -216,7 +267,11 @@ export class AppChain {
             registry.register(cap);
         }
 
-        return new AppChain(host, registry, identity, builder, verifier, log, config.auditExporter);
+        return new AppChain(host, registry, identity, builder, verifier, log, jtiCache, config.auditExporter);
+    }
+
+    destroy(): void {
+        this.jtiCache.destroy();
     }
 
     wrap<T extends object>(target: T, grants: ResolvedGrant[]): T {

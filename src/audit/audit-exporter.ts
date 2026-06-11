@@ -51,13 +51,12 @@ export class HttpAuditExporter implements AuditExporter {
     async export(entries: AuditEntry[]): Promise<void> {
         if (entries.length === 0) return;
 
-        // Split into batches
         for (let i = 0; i < entries.length; i += this.batchSize) {
             const batch = entries.slice(i, i + this.batchSize);
             await this.sendBatch(batch);
         }
     }
-
+    //NOTEBRIAN: shouldn't we have a signal is res is Ok?
     private async sendBatch(batch: AuditEntry[]): Promise<void> {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), this.timeoutMs);

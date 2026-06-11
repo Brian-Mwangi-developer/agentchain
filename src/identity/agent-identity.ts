@@ -3,8 +3,10 @@
 import {
     generateKeyPair,
     exportPublicKeyJwk,
+    exportPrivateKeyJwk,
     computeJwkThumbprint,
     importPublicKeyJwk,
+    importPrivateKeyJwk,
 } from "../crypto/ed25519.js";
 import { generateAgentId } from "../crypto/utils.js";
 import type { AgentConfig, CapabilityGrant, RegisteredAgent } from "../types/identity.js";
@@ -15,6 +17,8 @@ const STORE_KEY_IDENTITY = "agent:identity";
 export class AgentIdentity {
     readonly privateKey: CryptoKey;
     readonly registration: RegisteredAgent;
+    private cachedPublicKey?: CryptoKey;
+    private cachedHostPublicKey?: CryptoKey;
 
     private constructor(privateKey: CryptoKey, registration: RegisteredAgent) {
         this.privateKey = privateKey;
@@ -57,6 +61,23 @@ export class AgentIdentity {
         return new AgentIdentity(privateKey, registration);
     }
 
+    static async fromKeyPair(
+        privateKeyJwk: JsonWebKey,
+        publicKeyJwk: JsonWebKey,
+        registration: RegisteredAgent,
+        store: EncryptedStore
+    ): Promise<AgentIdentity> {
+        const privateKey = await importPrivateKeyJwk(privateKeyJwk);
+        const thumbprint = computeJwkThumbprint(publicKeyJwk);
+        const restored: RegisteredAgent = {
+            ...registration,
+            publicKeyJwk,
+            thumbprint,
+        };
+        store.set(STORE_KEY_IDENTITY, restored);
+        return new AgentIdentity(privateKey, restored);
+    }
+
     static async restore(privateKey: CryptoKey, store: EncryptedStore): Promise<AgentIdentity> {
         const registration = store.get<RegisteredAgent>(STORE_KEY_IDENTITY);
         if (!registration) throw new Error("AgentIdentity.restore: no identity found in store");
@@ -93,11 +114,21 @@ export class AgentIdentity {
         return this.registration.capabilities.find((g) => g.capability === name);
     }
 
+    async exportPrivateKeyJwk(): Promise<JsonWebKey> {
+        return exportPrivateKeyJwk(this.privateKey);
+    }
+
     async getPublicKey(): Promise<CryptoKey> {
-        return importPublicKeyJwk(this.registration.publicKeyJwk);
+        if (!this.cachedPublicKey) {
+            this.cachedPublicKey = await importPublicKeyJwk(this.registration.publicKeyJwk);
+        }
+        return this.cachedPublicKey;
     }
 
     async getHostPublicKey(): Promise<CryptoKey> {
-        return importPublicKeyJwk(this.registration.hostPublicKeyJwk);
+        if (!this.cachedHostPublicKey) {
+            this.cachedHostPublicKey = await importPublicKeyJwk(this.registration.hostPublicKeyJwk);
+        }
+        return this.cachedHostPublicKey;
     }
 }

@@ -1,4 +1,5 @@
-/** Proxy wrapper for arbitrary service objects. Registered methods are auth-gated via CapabilityRegistry. */
+/** Proxy wrapper for arbitrary service objects. Registered methods are auth-gated via CapabilityRegistry.
+ *  If a Capability has an `execute` function, it is called. Otherwise, the target's own method is called. */
 
 import { ChainAuthError } from "../errors/chain-error.js";
 import { enforceConstraints } from "../auth/constraints.js";
@@ -30,18 +31,21 @@ export function wrapApp<T extends object>(
             const capability = registry.get(prop);
             const value = Reflect.get(obj, prop);
 
-            if (capability === undefined || typeof value !== "function") {
+            if (capability === undefined) {
                 return value;
             }
 
-            return createInterceptedMethod(capability.name, ctx);
+            // Gate through auth. If capability has execute, use it; otherwise fall through to target method.
+            const targetFn = typeof value === "function" ? (value as Function).bind(obj) : undefined;
+            return createInterceptedMethod(capability.name, ctx, targetFn);
         },
     }) as T;
 }
 
 function createInterceptedMethod(
     capabilityName: string,
-    ctx: AppInterceptContext
+    ctx: AppInterceptContext,
+    targetFn?: (...args: unknown[]) => unknown
 ): (...args: unknown[]) => Promise<unknown> {
     return async (...args: unknown[]) => {
         const callArgs = (args[0] ?? {}) as Record<string, unknown>;
@@ -54,11 +58,19 @@ function createInterceptedMethod(
             const verified = await ctx.verifier.verify(token, capabilityName, ctx.grants);
             const authOverheadMs = Date.now() - authStart;
 
+            const registryEntry = getCapabilityFromCtx(capabilityName, ctx);
+            if (!registryEntry) {
+                throw new ChainAuthError(
+                    "capability_denied",
+                    `Capability "${capabilityName}" not found in registry`
+                );
+            }
+
             const grant = ctx.grants.find(
                 (g) => g.capability === capabilityName && g.status === "active"
             );
             if (grant?.constraints) {
-                enforceConstraints(grant.constraints, callArgs);
+                enforceConstraints(grant.constraints, callArgs, registryEntry.inputSchema);
             }
 
             const agentContext: AgentContext = {
@@ -69,18 +81,24 @@ function createInterceptedMethod(
                     .map((g) => g.capability),
             };
 
-            const registryEntry = getCapabilityFromCtx(capabilityName, ctx);
-            if (!registryEntry) {
+            // If Capability defines execute, use it. Otherwise, delegate to the target's method.
+            const executeFn = registryEntry.execute
+                ? (a: unknown) => registryEntry.execute!(a, agentContext)
+                : targetFn
+                    ? (...a: unknown[]) => Promise.resolve(targetFn(...a))
+                    : null;
+
+            if (!executeFn) {
                 throw new ChainAuthError(
                     "capability_denied",
-                    `Capability "${capabilityName}" not found in registry`
+                    `Capability "${capabilityName}" has no execute function and no target method to delegate to`
                 );
             }
 
             const callStart = Date.now();
             let result: unknown;
             try {
-                result = await registryEntry.execute(callArgs, agentContext);
+                result = await executeFn(callArgs);
             } catch (execErr) {
                 ctx.log.recordCall({
                     context: verified,
