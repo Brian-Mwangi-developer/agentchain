@@ -151,8 +151,10 @@ export class ApprovalStore {
                 }
             }
 
-            // For "value" scope, expand the `in` list for that field
-            if (rule.scope === "value" && rule.field && rule.value !== undefined) {
+            // For "value" and "call" scope, expand the `in` list for that field.
+            // "call" scope needs this too — without it the re-execution hits the
+            // same constraint violation and creates an infinite access request loop.
+            if ((rule.scope === "value" || rule.scope === "call") && rule.field && rule.value !== undefined) {
                 const existing = merged[rule.field];
                 if (existing && typeof existing === "object" && !Array.isArray(existing)) {
                     const op = existing as ConstraintOperator;
