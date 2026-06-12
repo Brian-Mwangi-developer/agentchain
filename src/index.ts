@@ -72,6 +72,24 @@ export type { StorePersistenceAdapter } from "./memory/encrypted-store.js";
 
 export type { VerifierConfig, VerifiedCallContext } from "./auth/token-verifier.js";
 
+// ─── Access Requests ─────────────────────────────────────────────────────────
+
+export { AccessRequestManager } from "./access/access-request-manager.js";
+export { ApprovalStore } from "./access/approval-store.js";
+
+export type {
+    AccessRequest,
+    AccessRequestStatus,
+    AccessRequestConfig,
+    AccessRequestNotifier,
+    ApprovalDecision,
+    DenialDecision,
+    ApprovalScope,
+    ApprovalTTL,
+    ApprovalRule,
+    SuspendedCall,
+} from "./types/access-request.js";
+
 // ─── Crypto utilities ─────────────────────────────────────────────────────────
 
 export {

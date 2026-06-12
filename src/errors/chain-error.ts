@@ -16,7 +16,10 @@ export type ChainErrorCode =
     | "token_replayed"
     | "token_expired"
     | "token_invalid"
-    | "agent_not_found";
+    | "agent_not_found"
+    | "access_request_pending"
+    | "access_request_denied"
+    | "access_request_expired";
 
 export class ChainAuthError extends Error {
     readonly code: ChainErrorCode;

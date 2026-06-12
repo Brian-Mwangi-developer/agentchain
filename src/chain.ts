@@ -11,11 +11,14 @@ import { wrapAnthropic } from "./wrappers/anthropic-wrapper.js";
 import { HostIdentity } from "./host/host-identity.js";
 import { CapabilityRegistry } from "./app/capability-registry.js";
 import { wrapApp, attachRegistry } from "./app/app-wrapper.js";
+import { AccessRequestManager } from "./access/access-request-manager.js";
+import { ApprovalStore } from "./access/approval-store.js";
 import type { AgentConfig, ChainStats, AuditSnapshot, AppChainConfig } from "./types/chain.js";
 import type { AuditEntry } from "./types/audit.js";
 import type { AuditExporter } from "./audit/audit-exporter.js";
 import type { ResolvedGrant, AgentConfiguration } from "./types/protocol.js";
 import type { AppInterceptContext } from "./app/app-wrapper.js";
+import type { ApprovalDecision, DenialDecision, AccessRequest, ApprovalRule } from "./types/access-request.js";
 
 export class AgentsChain {
     private readonly store: EncryptedStore;
@@ -163,6 +166,8 @@ export class AppChain {
     private readonly log: AuditLog;
     private readonly jtiCache: JtiCache;
     private readonly exporter?: AuditExporter;
+    private readonly accessRequestManager?: AccessRequestManager;
+    private readonly approvalStore?: ApprovalStore;
 
     private constructor(
         host: HostIdentity,
@@ -172,7 +177,9 @@ export class AppChain {
         verifier: TokenVerifier,
         log: AuditLog,
         jtiCache: JtiCache,
-        exporter?: AuditExporter
+        exporter?: AuditExporter,
+        accessRequestManager?: AccessRequestManager,
+        approvalStore?: ApprovalStore
     ) {
         this.host = host;
         this.registry = registry;
@@ -182,6 +189,8 @@ export class AppChain {
         this.log = log;
         this.jtiCache = jtiCache;
         this.exporter = exporter;
+        this.accessRequestManager = accessRequestManager;
+        this.approvalStore = approvalStore;
     }
 
     static async create(config: AppChainConfig): Promise<AppChain> {
@@ -267,11 +276,24 @@ export class AppChain {
             registry.register(cap);
         }
 
-        return new AppChain(host, registry, identity, builder, verifier, log, jtiCache, config.auditExporter);
+        // Access request system (optional)
+        let accessRequestManager: AccessRequestManager | undefined;
+        let approvalStoreInstance: ApprovalStore | undefined;
+        if (config.accessRequests) {
+            accessRequestManager = new AccessRequestManager(config.accessRequests);
+            // The approval secret must match between manager and store for integrity checks.
+            approvalStoreInstance = new ApprovalStore(store, accessRequestManager.approvalSecret);
+        }
+
+        return new AppChain(
+            host, registry, identity, builder, verifier, log, jtiCache,
+            config.auditExporter, accessRequestManager, approvalStoreInstance
+        );
     }
 
     destroy(): void {
         this.jtiCache.destroy();
+        this.accessRequestManager?.destroy();
     }
 
     wrap<T extends object>(target: T, grants: ResolvedGrant[]): T {
@@ -281,10 +303,80 @@ export class AppChain {
             verifier: this.verifier,
             log: this.log,
             grants,
+            accessRequestManager: this.accessRequestManager,
+            approvalStore: this.approvalStore,
         };
         attachRegistry(ctx, this.registry);
         return wrapApp(target, this.registry, ctx);
     }
+
+    // ─── Access Request API ──────────────────────────────────────────────────
+
+    /**
+     * Approve a pending access request. Called by the server when a human
+     * submits their verification code (via webhook, API endpoint, UI, etc.).
+     *
+     * The verification code was sent out-of-band to the human — the agent
+     * cannot forge it because it doesn't have the HMAC secret.
+     */
+    approve(decision: ApprovalDecision): AccessRequest {
+        if (!this.accessRequestManager) {
+            throw new Error("Access requests are not enabled on this AppChain");
+        }
+        return this.accessRequestManager.approve(decision);
+    }
+
+    /**
+     * Deny a pending access request.
+     */
+    deny(decision: DenialDecision): AccessRequest {
+        if (!this.accessRequestManager) {
+            throw new Error("Access requests are not enabled on this AppChain");
+        }
+        return this.accessRequestManager.deny(decision);
+    }
+
+    /**
+     * Get all pending access requests (for building a dashboard/UI).
+     */
+    getPendingRequests(): AccessRequest[] {
+        return this.accessRequestManager?.getAllPending() ?? [];
+    }
+
+    /**
+     * Get all active approval rules.
+     */
+    getApprovalRules(): ApprovalRule[] {
+        return this.approvalStore?.getAll() ?? [];
+    }
+
+    /**
+     * Revoke a specific approval rule.
+     */
+    revokeApproval(ruleId: string): boolean {
+        return this.approvalStore?.revokeRule(ruleId) ?? false;
+    }
+
+    /**
+     * Revoke all approval rules for a capability.
+     */
+    revokeApprovalsForCapability(capability: string): number {
+        return this.approvalStore?.revokeAllForCapability(capability) ?? 0;
+    }
+
+    /**
+     * Revoke all approval rules (nuclear option).
+     */
+    revokeAllApprovals(): number {
+        return this.approvalStore?.revokeAll() ?? 0;
+    }
+
+    /** Whether access requests are enabled on this chain. */
+    get accessRequestsEnabled(): boolean {
+        return this.accessRequestManager !== undefined;
+    }
+
+    // ─── Existing API ────────────────────────────────────────────────────────
 
     /** Serve this at GET /.well-known/agent-configuration for agent discovery. */
     getWellKnownConfig(
