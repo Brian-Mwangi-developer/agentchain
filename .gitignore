@@ -5,5 +5,9 @@ node_modules
 *.excalidraw*
 check.md
 current.md
-overview.md
-OVERVIEW.md
+
+
+# Docusaurus
+website/node_modules
+website/.docusaurus
+website/build

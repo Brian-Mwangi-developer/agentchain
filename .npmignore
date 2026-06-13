@@ -13,3 +13,6 @@ agents-chain-dashboard.excalidraw
 dist/__tests__/
 *.env*
 
+# Docusaurus website
+website/
+
