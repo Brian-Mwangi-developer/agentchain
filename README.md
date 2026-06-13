@@ -1,6 +1,6 @@
 # agents-chain
 
-**v0.0.45** — A zero-dependency security layer for AI agent systems. Gives every service a **Host identity**, every agent an **Ed25519 keypair**, and gates every capability call through a signed JWT pipeline with constraint enforcement and an encrypted audit trail.
+**v0.0.55** — A zero-dependency security layer for AI agent systems. Gives every service a **Host identity**, every agent an **Ed25519 keypair**, and gates every capability call through a signed JWT pipeline with constraint enforcement, an encrypted audit trail, and a **human-in-the-loop access request system** for denied calls.
 
 Built for the pattern where a **Host** registers capabilities that **Agents** are granted permission to call — with full cryptographic accountability at every step.
 
@@ -19,6 +19,7 @@ Built for the pattern where a **Host** registers capabilities that **Agents** ar
 - **Persistent store adapter** — Plug in Redis or any key-value store for `EncryptedStore` to survive restarts.
 - **Well-known discovery** — Serve `GET /.well-known/agent-configuration` with one call so other agents can discover your capabilities automatically.
 - **Zero mandatory dependencies** — Everything defaults to in-memory. External systems are adapter-injected by you.
+- **Human-in-the-loop access requests** — When an agent is denied, instead of throwing, the call suspends and waits for human approval out-of-band. A pluggable notifier sends the verification code via email, SMS, push, or webhook. The agent's call resumes exactly where it left off when approved.
 
 ---
 
@@ -448,6 +449,95 @@ Error codes:
 | `agent_not_found` | `sub` claim does not match a registered agent |
 | `capability_denied` | No active grant for the requested capability, or grant has expired |
 | `constraint_violated` | Call arguments violated a grant constraint or a required field was missing |
+| `access_request_denied` | A pending access request was explicitly denied by the human operator |
+| `access_request_expired` | A pending access request timed out before the human responded |
+
+---
+
+## Access request system
+
+When `accessRequests` is configured, denied calls **suspend** instead of throwing. The agent's call blocks on a Promise while a human reviews it out-of-band. When approved, the call resumes exactly where it left off.
+
+### Setup
+
+```ts
+const chain = await AppChain.create({
+  providerName: 'my-service',
+  issuer: 'https://myservice.com',
+  capabilities: [...],
+  accessRequests: {
+    approvalSecret: process.env.APPROVAL_SECRET, // keep outside agent reach
+    requestTTLMs: 5 * 60 * 1000,                // requests expire after 5 min
+    notifier: {
+      async notify(request) {
+        // send via email, SMS, push, webhook — your choice
+        await sendEmail({
+          to: 'admin@myservice.com',
+          subject: `Agent access request: ${request.capability}`,
+          body: `Agent "${request.agentName}" wants to call ${request.capability}\n` +
+                `Args: ${JSON.stringify(request.args)}\n` +
+                `Code: ${request.verificationCode}\n` +
+                `Approve: POST /approve { requestId: "${request.requestId}", code, scope }`,
+        });
+      },
+      async onResolved(request, outcome) {
+        // optional: update your UI when the request is approved/denied/expired
+      },
+    },
+  },
+});
+```
+
+### Approval endpoint
+
+```ts
+app.post('/approve', (req, res) => {
+  const { requestId, code, scope, ttl } = req.body;
+  try {
+    const result = chain.approve({ requestId, code, scope, ttl });
+    // The suspended agent call resumes automatically here
+    res.json({ ok: true, capability: result.capability });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/deny', (req, res) => {
+  const { requestId, code, reason } = req.body;
+  try {
+    chain.deny({ requestId, code, reason });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+```
+
+### Approval scopes
+
+| Scope | What it approves | Duration |
+|-------|-----------------|----------|
+| `call` | This exact call only — rule is revoked immediately after | One-time |
+| `value` | The specific field value (e.g. `+254799999999` added to the `to` whitelist) | Session |
+| `capability` | All calls to this capability — constraints bypassed | Session |
+| `global` | All calls to this capability — encrypted, survives restart | Persistent |
+
+### Dashboard API
+
+```ts
+chain.getPendingRequests()                    // AccessRequest[] — what's waiting
+chain.getApprovalRules()                      // ApprovalRule[] — what's been approved
+chain.revokeApproval(ruleId)                  // revoke a specific rule
+chain.revokeApprovalsForCapability(capability) // revoke all rules for a capability
+chain.revokeAllApprovals()                    // wipe all approval rules
+chain.accessRequestsEnabled                   // boolean
+```
+
+### Security model
+
+The verification code is an HMAC-SHA256 digest of `requestId + agentId + capability + createdAt`, truncated to 8 uppercase hex characters. The secret is a `private readonly Buffer` inside `AccessRequestManager` — never reachable from agent execution context. A code from one request cannot be replayed on a different one.
+
+Approval rules are stored AES-256-GCM encrypted with an HMAC integrity tag. If the store is modified directly, the HMAC check fails on load and all rules are wiped.
 
 ---
 
@@ -477,6 +567,13 @@ type AppChainConfig = {
   storeAdapter?: StorePersistenceAdapter;
   grantResolver?: (agentId: string, capability: string) => Promise<ResolvedGrant | undefined>;
   auditExporter?: AuditExporter;
+
+  // Access request system — enables suspend/resume for denied calls
+  accessRequests?: {
+    approvalSecret: string;           // HMAC secret — keep outside agent reach
+    requestTTLMs?: number;            // How long a pending request stays open (default: 5 min)
+    notifier: AccessRequestNotifier;  // Delivery channel (email, SMS, push, webhook)
+  };
 };
 ```
 
@@ -592,6 +689,19 @@ const stats = chain.getStats();
 ---
 
 ## Changelog
+
+### v0.0.55
+
+**Access request system — human-in-the-loop approval for denied agent calls:**
+
+- **`AccessRequestManager`** — generates HMAC-SHA256 verification codes, tracks pending requests with configurable TTL, handles approve/deny/expire. The secret is a `private readonly Buffer` — the agent has no path to it.
+- **`ApprovalStore`** — tamper-proof encrypted rule storage. AES-256-GCM via `EncryptedStore` + HMAC integrity tag over the full rule list. If the store is modified directly, all rules are wiped on next load.
+- **4 approval scopes** — `call` (one-time), `value` (session whitelist expansion), `capability` (session bypass), `global` (persistent across restarts).
+- **Suspend/resume** — a denied agent call blocks on a `Promise` inside the Proxy interceptor. The closure preserves capability name, args, and auth context. When the human approves, the Promise resolves and the exact same call re-executes with expanded constraints.
+- **Pluggable notifier** — implement `AccessRequestNotifier.notify(request)` to deliver verification codes via any channel (email, SMS, push, webhook).
+- **`AppChain` API additions** — `approve()`, `deny()`, `getPendingRequests()`, `getApprovalRules()`, `revokeApproval()`, `revokeApprovalsForCapability()`, `revokeAllApprovals()`, `accessRequestsEnabled`.
+- **Bug fix** — `call` scope approval now correctly expands the `in` constraint list before re-execution, preventing an infinite access-request loop.
+- **Package size** — stripped test files from the npm bundle. Packed: 136.8 kB → 55.2 kB (60% reduction).
 
 ### v0.0.45
 

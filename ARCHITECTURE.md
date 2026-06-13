@@ -1,6 +1,6 @@
 # agents-chain — Architecture
 
-This document describes the internal structure and data flows of the `agents-chain` package as of v0.0.45.
+This document describes the internal structure and data flows of the `agents-chain` package as of v0.0.55.
 
 ---
 
@@ -45,12 +45,20 @@ agents-chain/
 │   ├── openai-wrapper.ts      wrapOpenAI() — Proxy over OpenAI SDK, maps method paths → capability strings
 │   └── anthropic-wrapper.ts   wrapAnthropic() — Proxy over Anthropic SDK, maps method paths → capability strings
 │
+├── access/
+│   ├── access-request-manager.ts  AccessRequestManager — HMAC code generation, pending request
+│   │                               tracking, approve/deny/expire, suspended Promise map
+│   └── approval-store.ts           ApprovalStore — encrypted + HMAC-integrity rule storage,
+│                                   constraint expansion and merging
+│
 └── types/
     ├── capabilities.ts        Capability, AgentContext, GrantConstraints, JsonSchemaObject
     ├── chain.ts               AgentConfig, AppChainConfig, ChainStats, AuditSnapshot
     ├── identity.ts            RegisteredAgent, CapabilityGrant, CapabilityConstraints
     ├── audit.ts               AuditEntry, AuditResult
-    └── protocol.ts            HostJwtClaims, AgentJwtClaims, ResolvedGrant, AgentConfiguration
+    ├── protocol.ts            HostJwtClaims, AgentJwtClaims, ResolvedGrant, AgentConfiguration
+    └── access-request.ts      AccessRequest, ApprovalScope, ApprovalDecision, DenialDecision,
+                               ApprovalRule, SuspendedCall, AccessRequestNotifier, AccessRequestConfig
 ```
 
 ---
@@ -93,8 +101,13 @@ AppChain.create(config)
     ├── 6. TokenVerifier(identity, jtiCache) — runs 11-step verification pipeline
     ├── 7. AuditLog(store)                   — in-memory buffer backed by EncryptedStore
     │
-    └── 8. CapabilityRegistry
-            └── registry.register(cap) for each capability in config.capabilities
+    ├── 8. CapabilityRegistry
+    │       └── registry.register(cap) for each capability in config.capabilities
+    │
+    └── 9. (optional) AccessRequestManager + ApprovalStore
+            └── created when config.accessRequests is set
+                AccessRequestManager(approvalSecret, requestTTLMs, notifier)
+                ApprovalStore(store, approvalSecret)   ← shares same secret for HMAC integrity
 ```
 
 ---
@@ -124,7 +137,11 @@ caller → secured.someMethod(args)
     │       │
     │       └── returns VerifiedCallContext { agentId, thumbprint, hostThumbprint, capability, jti }
     │
-    ├── enforceConstraints(grant.constraints, args, capability.inputSchema)
+    ├── ApprovalStore.getExpandedConstraints(capability)
+    │       └── merges any active approval rules into grant constraints
+    │           returns: null (bypass all) | undefined (no rules) | GrantConstraints (merged)
+    │
+    ├── enforceConstraints(effectiveConstraints, args, capability.inputSchema)
     │       └── for each constrained field:
     │               - if field in inputSchema.required and value === undefined → constraint_violated
     │               - max/min/in/not_in/exact equality checks on present values
@@ -135,8 +152,30 @@ caller → secured.someMethod(args)
     │
     ├── executeFn(args)
     │
-    └── AuditLog.recordCall({ context, args, result, durationMs, authOverheadMs })
-            └── on ChainAuthError → AuditLog.recordDenied(...)
+    ├── AuditLog.recordCall({ context, args, result, durationMs, authOverheadMs })
+    │
+    └── on ChainAuthError (constraint_violated | capability_denied):
+            │
+            ├── [no accessRequestManager] → AuditLog.recordDenied(...) → throw
+            │
+            └── [accessRequestManager present]
+                    │
+                    ├── ApprovalStore.findMatchingRule() → existing rule?
+                    │       └── yes → re-execute (rule expands constraints)
+                    │
+                    ├── AuditLog.recordDenied(reason: "[access_request] ...")
+                    │
+                    ├── AccessRequestManager.createRequest(...)
+                    │       └── generates HMAC code, stores SuspendedCall { resolve, reject }
+                    │           notifier.notify(request)   ← sends code to human out-of-band
+                    │
+                    ├── await waitForApproval   ← SUSPENDED — agent call blocks here
+                    │
+                    ├── [approved] → ApprovalStore.createRule(request, decision)
+                    │       ├── scope "call"       → re-execute once, then revokeRule()
+                    │       └── scope "value/capability/global" → re-execute (rule persists)
+                    │
+                    └── [denied/expired] → throw ChainAuthError(access_request_denied/expired)
 ```
 
 ---
@@ -257,6 +296,57 @@ CapabilityRegistry
 
 ---
 
+## Access request internals
+
+```
+AccessRequestManager
+    ├── pendingRequests: Map<requestId, AccessRequest>
+    ├── suspendedCalls:  Map<requestId, SuspendedCall { resolve, reject }>
+    ├── readonly secret: Buffer          ← agent can never reach this
+    │
+    ├── createRequest(params)
+    │       ├── generateId("areq")       → requestId
+    │       ├── generateCode()           → HMAC-SHA256(secret, requestId:agentId:capability:createdAt)
+    │       │                               truncated to 8 uppercase hex chars → "A3F7C209"
+    │       ├── stores request + new Promise in suspendedCalls
+    │       ├── schedules expiry timer (requestTTLMs)
+    │       ├── notifier.notify(request) ← sends code out-of-band
+    │       └── returns { request, waitForApproval: Promise }
+    │
+    ├── approve(decision)
+    │       ├── verifyCode() — constant-time HMAC compare (prevents timing attacks)
+    │       └── suspendedCalls.get(requestId).resolve({ approved: true, decision })
+    │
+    ├── deny(decision)
+    │       └── suspendedCalls.get(requestId).resolve({ approved: false, decision })
+    │
+    └── destroy()   → clears all expiry timers
+
+ApprovalStore
+    ├── rules: ApprovalRule[]            ← in-memory cache
+    ├── readonly secret: Buffer          ← same secret as AccessRequestManager
+    │
+    ├── createRule(request, decision)
+    │       └── builds ApprovalRule from scope, field, value, TTL → persist()
+    │
+    ├── findMatchingRule(agentId, capability, args, violatedField, violatedValue)
+    │       └── sweepExpired() → iterate rules → match by scope:
+    │               "call"       → skip (consumed immediately)
+    │               "value"      → match if field + value match
+    │               "capability" → always match
+    │               "global"     → always match
+    │
+    ├── getExpandedConstraints(capability)
+    │       └── returns null (capability/global rule found — bypass all constraints)
+    │               undefined (no matching rules — use original constraints)
+    │               GrantConstraints (value/call rules — merged in list expansions)
+    │
+    ├── persist()   → store.set(rules) + store.set(HMAC over rules JSON)
+    └── load()      → recompute HMAC; if mismatch → wipe all rules + warn
+```
+
+---
+
 ## Persistence adapter injection points
 
 ```
@@ -312,11 +402,12 @@ dist/
 ## Test structure
 
 ```
-src/__tests__/agents-chain.test.ts    20 suites, 85 unit + integration tests (Node built-in test runner)
-scripts/test-cjs.cjs                  27 CJS artifact tests  (require from dist/cjs)
-scripts/test-esm.mjs                  28 ESM artifact tests  (import from dist/esm)
+src/__tests__/agents-chain.test.ts      20 suites, 87 unit + integration tests
+src/__tests__/access-requests.test.ts   4 suites, 57 access request tests
+scripts/test-cjs.cjs                    27 CJS artifact tests  (require from dist/cjs)
+scripts/test-esm.mjs                    28 ESM artifact tests  (import from dist/esm)
 
-pnpm test             build + unit suite (85 tests)
+pnpm test             build + unit suites (130 tests)
 pnpm test:interop     CJS + ESM artifact tests (55 tests, no rebuild)
 pnpm test:all         both of the above
 ```

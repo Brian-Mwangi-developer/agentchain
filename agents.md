@@ -1,6 +1,6 @@
 # agents-chain — Agent Integration Guide
 
-This guide is for AI agents (autonomous or delegated) that want to call capabilities exposed by a service protected with **agents-chain**.
+This guide is for AI agents (autonomous or delegated) that want to call capabilities exposed by a service protected with **agents-chain** (v0.0.55).
 
 ---
 
@@ -156,6 +156,29 @@ Violating a constraint throws `constraint_violated` before your call reaches the
 
 ---
 
+## Access request system — your call may suspend
+
+If the service has enabled the **access request system**, a denied call does **not** throw immediately. Instead your call **suspends** — the Promise blocks — while the human operator reviews the request out-of-band.
+
+When the operator approves, your call **resumes automatically** with expanded constraints and returns a result as if nothing happened. You do not need to retry.
+
+If the operator **denies** the request, your call throws `ChainAuthError` with code `access_request_denied`. If the request **expires** (the operator didn't respond in time), it throws `access_request_expired`.
+
+### What this means for your agent
+
+- **No retry logic needed** — if the service has access requests enabled, your `await secured.someMethod(args)` will eventually resolve (approved) or throw (denied/expired). Just handle the error codes.
+- **Calls can take minutes** — don't set tight timeouts on gated calls if access requests are enabled.
+- **The constraint that was violated may be expanded** — after approval, the value you passed will be added to the service's whitelist for future calls (depending on the scope the operator chose).
+
+### Error codes added in v0.0.55
+
+| Code | Meaning |
+|------|---------|
+| `access_request_denied` | The human operator explicitly denied the request |
+| `access_request_expired` | The request timed out before the operator responded |
+
+---
+
 ## Error codes
 
 | Code | Meaning |
@@ -166,6 +189,8 @@ Violating a constraint throws `constraint_violated` before your call reaches the
 | `agent_not_found` | `sub` does not match the registered agentId |
 | `capability_denied` | No active grant, or grant is pending/denied/expired |
 | `constraint_violated` | Call arguments violate grant constraints |
+| `access_request_denied` | Human operator denied the access request |
+| `access_request_expired` | Access request timed out before operator responded |
 
 ---
 
