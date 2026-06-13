@@ -1,5 +1,5 @@
 
-export type AuditResult = "success" | "denied" | "error";
+export type AuditResult = "success" | "denied" | "error" | "access_requested" | "access_approved" | "access_denied";
 
 export type AuditEntry = {
     id: string;
@@ -16,4 +16,8 @@ export type AuditEntry = {
     timestamp: number;
     durationMs: number;
     authOverheadMs: number;
+    /** Set when result is access_requested/access_approved/access_denied. */
+    accessRequestId?: string;
+    /** The approval scope that was applied (for access_approved). */
+    approvalScope?: import("./access-request.js").ApprovalScope;
 };

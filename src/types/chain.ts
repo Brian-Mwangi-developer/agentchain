@@ -4,6 +4,7 @@ import type { JtiPersistenceAdapter } from "../memory/jti-cache.js";
 import type { AuditEntry } from "./audit.js";
 import type { Capability } from "./capabilities.js";
 import type { AgentConfig } from "./identity.js";
+import type { AccessRequestConfig } from "./access-request.js";
 
 export type { AgentConfig };
 
@@ -30,6 +31,8 @@ export type AppChainConfig = {
     auditExporter?: AuditExporter;
     /** Resolve grants from DB/Redis instead of the grants passed to wrap(). */
     grantResolver?: VerifierConfig["grantResolver"];
+    /** Enable agent access requests — agents can request permission for denied actions. */
+    accessRequests?: AccessRequestConfig;
 };
 
 export type ChainStats = {

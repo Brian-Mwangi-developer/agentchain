@@ -1,6 +1,6 @@
 {
   "name": "agents-chain",
-  "version": "0.0.45",
+  "version": "0.0.5-1",
   "description": "Lightweight identity, auth, and audit layer for AI agent SDKs (OpenAI, Anthropic)",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
@@ -28,7 +28,7 @@
     "prepublishOnly": "pnpm run build",
     "lint": "prettier --check .",
     "format": "prettier --write .",
-    "test": "pnpm run build && node --test dist/esm/__tests__/agents-chain.test.js",
+    "test": "pnpm run build && node --test dist/esm/__tests__/agents-chain.test.js dist/esm/__tests__/access-requests.test.js",
     "test:interop": "node --test scripts/test-cjs.cjs && node --test scripts/test-esm.mjs",
     "test:all": "pnpm run test && pnpm run test:interop"
   },
