@@ -1,6 +1,6 @@
 {
   "name": "agents-chain",
-  "version": "0.0.5-1",
+  "version": "0.0.55",
   "description": "Lightweight identity, auth, and audit layer for AI agent SDKs (OpenAI, Anthropic)",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
@@ -18,7 +18,15 @@
     }
   },
   "files": [
-    "dist",
+    "dist/cjs/**/*.js",
+    "dist/cjs/**/*.d.ts",
+    "dist/cjs/**/*.d.ts.map",
+    "dist/cjs/package.json",
+    "dist/esm/**/*.js",
+    "dist/esm/**/*.d.ts",
+    "dist/esm/**/*.d.ts.map",
+    "!dist/cjs/__tests__",
+    "!dist/esm/__tests__",
     "README.md",
     "LICENSE"
   ],
