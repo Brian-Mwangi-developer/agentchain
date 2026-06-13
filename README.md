@@ -1,6 +1,6 @@
 # agents-chain
 
-**v0.0.56** — Zero-dependency security layer for AI agent systems. Ed25519 identity, JWT auth, constraint enforcement, encrypted audit, and human-in-the-loop access requests.
+**v0.0.57** — Zero-dependency security layer for AI agent systems. Ed25519 identity, JWT auth, constraint enforcement, encrypted audit, and human-in-the-loop access requests.
 
 [![npm](https://img.shields.io/npm/v/agents-chain)](https://www.npmjs.com/package/agents-chain)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)

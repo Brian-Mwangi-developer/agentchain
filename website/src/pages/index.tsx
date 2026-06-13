@@ -92,12 +92,13 @@ export default function Home(): ReactNode {
           </div>
         </section>
         <section style={{textAlign: 'center', padding: '2rem 0 3rem'}}>
-          <p style={{opacity: 0.6, fontSize: '0.9rem'}}>
-            Sponsored by{' '}
-            <a href="https://melduo.com" target="_blank" rel="noopener noreferrer">
-              Melduo
-            </a>
-          </p>
+          <a href="https://melduo.com" target="_blank" rel="noopener noreferrer">
+            <img
+              src={require('@site/static/img/sponsoredmelduo.png').default}
+              alt="Sponsored by Melduo"
+              style={{maxWidth: 280, opacity: 0.9}}
+            />
+          </a>
         </section>
       </main>
     </Layout>
