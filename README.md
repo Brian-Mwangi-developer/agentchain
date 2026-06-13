@@ -744,6 +744,12 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full data-flow diagrams coverin
 
 ---
 
+## Sponsored by
+
+[![Sponsored by Melduo](https://raw.githubusercontent.com/Brian-Mwangi-developer/agentchain/main/docs/sponsoredmelduo.png)](https://melduo.com)
+
+---
+
 ## License
 
 MIT — [brianmwangidev](https://www.npmjs.com/~brianmwangidev)
