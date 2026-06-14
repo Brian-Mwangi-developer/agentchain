@@ -11,8 +11,8 @@ const config: Config = {
     v4: true,
   },
 
-  url: 'https://brian-mwangi-developer.github.io',
-  baseUrl: '/agentchain/',
+  url: 'https://agent-chain.melduo.com',
+  baseUrl: '/',
 
   organizationName: 'Brian-Mwangi-developer',
   projectName: 'agentchain',
