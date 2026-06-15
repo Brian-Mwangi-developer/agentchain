@@ -1,24 +1,25 @@
 /** AgentsChain — wraps OpenAI/Anthropic SDK clients with auth, identity, and audit. */
 
-import { EncryptedStore } from "./memory/encrypted-store.js";
-import { JtiCache } from "./memory/jti-cache.js";
-import { AgentIdentity } from "./identity/agent-identity.js";
-import { TokenBuilder } from "./auth/token-builder.js";
-import { TokenVerifier } from "./auth/token-verifier.js";
-import { AuditLog } from "./audit/audit-log.js";
-import { wrapOpenAI } from "./wrappers/openai-wrapper.js";
-import { wrapAnthropic } from "./wrappers/anthropic-wrapper.js";
-import { HostIdentity } from "./host/host-identity.js";
-import { CapabilityRegistry } from "./app/capability-registry.js";
-import { wrapApp, attachRegistry } from "./app/app-wrapper.js";
 import { AccessRequestManager } from "./access/access-request-manager.js";
 import { ApprovalStore } from "./access/approval-store.js";
-import type { AgentConfig, ChainStats, AuditSnapshot, AppChainConfig } from "./types/chain.js";
-import type { AuditEntry } from "./types/audit.js";
-import type { AuditExporter } from "./audit/audit-exporter.js";
-import type { ResolvedGrant, AgentConfiguration } from "./types/protocol.js";
 import type { AppInterceptContext } from "./app/app-wrapper.js";
-import type { ApprovalDecision, DenialDecision, AccessRequest, ApprovalRule } from "./types/access-request.js";
+import { attachRegistry, wrapApp } from "./app/app-wrapper.js";
+import { CapabilityRegistry } from "./app/capability-registry.js";
+import { createRequestPermissionCapability } from "./app/request-permission-capability.js";
+import type { AuditExporter } from "./audit/audit-exporter.js";
+import { AuditLog } from "./audit/audit-log.js";
+import { TokenBuilder } from "./auth/token-builder.js";
+import { TokenVerifier } from "./auth/token-verifier.js";
+import { HostIdentity } from "./host/host-identity.js";
+import { AgentIdentity } from "./identity/agent-identity.js";
+import { EncryptedStore } from "./memory/encrypted-store.js";
+import { JtiCache } from "./memory/jti-cache.js";
+import type { AccessRequest, ApprovalDecision, ApprovalRule, DenialDecision } from "./types/access-request.js";
+import type { AuditEntry } from "./types/audit.js";
+import type { AgentConfig, AppChainConfig, AuditSnapshot, ChainStats } from "./types/chain.js";
+import type { AgentConfiguration, ResolvedGrant } from "./types/protocol.js";
+import { wrapAnthropic } from "./wrappers/anthropic-wrapper.js";
+import { wrapOpenAI } from "./wrappers/openai-wrapper.js";
 
 export class AgentsChain {
     private readonly store: EncryptedStore;
@@ -168,6 +169,7 @@ export class AppChain {
     private readonly exporter?: AuditExporter;
     private readonly accessRequestManager?: AccessRequestManager;
     private readonly approvalStore?: ApprovalStore;
+    private readonly _constraintAware: boolean;
 
     private constructor(
         host: HostIdentity,
@@ -177,6 +179,7 @@ export class AppChain {
         verifier: TokenVerifier,
         log: AuditLog,
         jtiCache: JtiCache,
+        constraintAware: boolean,
         exporter?: AuditExporter,
         accessRequestManager?: AccessRequestManager,
         approvalStore?: ApprovalStore
@@ -188,6 +191,7 @@ export class AppChain {
         this.verifier = verifier;
         this.log = log;
         this.jtiCache = jtiCache;
+        this._constraintAware = constraintAware;
         this.exporter = exporter;
         this.accessRequestManager = accessRequestManager;
         this.approvalStore = approvalStore;
@@ -285,9 +289,35 @@ export class AppChain {
             approvalStoreInstance = new ApprovalStore(store, accessRequestManager.approvalSecret);
         }
 
+        const constraintAware = config.constraintAware ?? false;
+
+        // Auto-register the built-in request_permission capability when both
+        // constraintAware and accessRequests are enabled. This gives AI agents
+        // an explicit tool to request human approval.
+        if (constraintAware && accessRequestManager && approvalStoreInstance) {
+            // grants will be provided at wrap() time, so we create a placeholder
+            // that gets updated on each wrap() call. The capability is registered
+            // once at init; the grants reference is updated via closure.
+            const rpGrantsRef: { current: ResolvedGrant[] } = { current: [] };
+            const requestPermissionCap = createRequestPermissionCapability({
+                identity,
+                builder,
+                verifier,
+                log,
+                get grants() { return rpGrantsRef.current; },
+                registry,
+                accessRequestManager,
+                approvalStore: approvalStoreInstance,
+            });
+            registry.register(requestPermissionCap);
+
+            // Store the grants ref so wrap() can update it
+            (registry as unknown as Record<string, unknown>).__rpGrantsRef = rpGrantsRef;
+        }
+
         return new AppChain(
             host, registry, identity, builder, verifier, log, jtiCache,
-            config.auditExporter, accessRequestManager, approvalStoreInstance
+            constraintAware, config.auditExporter, accessRequestManager, approvalStoreInstance
         );
     }
 
@@ -297,14 +327,33 @@ export class AppChain {
     }
 
     wrap<T extends object>(target: T, grants: ResolvedGrant[]): T {
+        // Auto-include grant for the built-in request_permission capability when
+        // constraintAware mode is active. The caller's grants only cover their own
+        // capabilities (e.g. send_sms) — request_permission is a system capability
+        // that is always available when the feature is enabled.
+        const effectiveGrants: ResolvedGrant[] = this._constraintAware
+            ? [
+                ...grants,
+                { capability: "request_permission", status: "active" as const },
+              ]
+            : grants;
+
+        // Update the grants reference for the request_permission capability
+        const rpGrantsRef = (this.registry as unknown as Record<string, unknown>).__rpGrantsRef as
+            { current: ResolvedGrant[] } | undefined;
+        if (rpGrantsRef) {
+            rpGrantsRef.current = effectiveGrants;
+        }
+
         const ctx: AppInterceptContext = {
             identity: this.identity,
             builder: this.builder,
             verifier: this.verifier,
             log: this.log,
-            grants,
+            grants: effectiveGrants,
             accessRequestManager: this.accessRequestManager,
             approvalStore: this.approvalStore,
+            constraintAware: this._constraintAware,
         };
         attachRegistry(ctx, this.registry);
         return wrapApp(target, this.registry, ctx);
@@ -371,9 +420,70 @@ export class AppChain {
         return this.approvalStore?.revokeAll() ?? 0;
     }
 
+    get agentId(): string {
+        return this.identity.agentId;
+    }
+
+    get hostId(): string {
+        return this.host.hostId;
+    }
+
     /** Whether access requests are enabled on this chain. */
     get accessRequestsEnabled(): boolean {
         return this.accessRequestManager !== undefined;
+    }
+
+    /** Whether constraint-aware mode is enabled. */
+    get constraintAware(): boolean {
+        return this._constraintAware;
+    }
+
+    /**
+     * Generate an AI-system-prompt-ready description of all active constraints.
+     * Include this in your AI agent's system prompt so it knows the rules upfront.
+     */
+    getConstraintContext(grants: ResolvedGrant[]): string {
+        const lines: string[] = [
+            "You are operating under capability constraints enforced by the agents-chain protocol.",
+            "When a call violates a constraint, you will receive a structured violation result.",
+        ];
+
+        if (this._constraintAware && this.accessRequestManager) {
+            lines.push(
+                'You have access to a "request_permission" tool that lets you request human approval for blocked calls.',
+                ""
+            );
+        }
+
+        lines.push("Active constraints:");
+
+        const activeGrants = grants.filter((g) => g.status === "active");
+        if (activeGrants.length === 0) {
+            lines.push("  (no active grants)");
+            return lines.join("\n");
+        }
+
+        for (const grant of activeGrants) {
+            if (!grant.constraints || Object.keys(grant.constraints).length === 0) {
+                lines.push(`  - ${grant.capability}: no constraints (unrestricted)`);
+                continue;
+            }
+
+            lines.push(`  - ${grant.capability}:`);
+            for (const [field, constraint] of Object.entries(grant.constraints as Record<string, unknown>)) {
+                lines.push(`      ${field}: ${formatConstraintForPrompt(constraint)}`);
+            }
+        }
+
+        if (this._constraintAware && this.accessRequestManager) {
+            lines.push(
+                "",
+                "If you need to use a value outside these constraints, call request_permission with the capability name, args, and reason.",
+                "A human operator will review your request."
+            );
+        }
+
+        return lines.join("\n");
     }
 
     // ─── Existing API ────────────────────────────────────────────────────────
@@ -418,4 +528,34 @@ export class AppChain {
     async drain(exporter?: AuditExporter): Promise<void> {
         return this.log.drain(exporter ?? this.exporter);
     }
+}
+
+// ─── Module-level helpers ────────────────────────────────────────────────────
+
+function formatConstraintForPrompt(constraint: unknown): string {
+    if (typeof constraint === "string" || typeof constraint === "number" || typeof constraint === "boolean") {
+        return `must be exactly ${JSON.stringify(constraint)}`;
+    }
+
+    if (typeof constraint === "object" && constraint !== null) {
+        const op = constraint as Record<string, unknown>;
+        const parts: string[] = [];
+
+        if (op.in && Array.isArray(op.in)) {
+            parts.push(`must be one of [${(op.in as unknown[]).map((v) => JSON.stringify(v)).join(", ")}]`);
+        }
+        if (op.not_in && Array.isArray(op.not_in)) {
+            parts.push(`must NOT be [${(op.not_in as unknown[]).map((v) => JSON.stringify(v)).join(", ")}]`);
+        }
+        if (typeof op.max === "number") {
+            parts.push(`maximum ${op.max}`);
+        }
+        if (typeof op.min === "number") {
+            parts.push(`minimum ${op.min}`);
+        }
+
+        return parts.length > 0 ? parts.join(", ") : JSON.stringify(constraint);
+    }
+
+    return String(constraint);
 }

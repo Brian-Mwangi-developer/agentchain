@@ -33,6 +33,16 @@ export type AppChainConfig = {
     grantResolver?: VerifierConfig["grantResolver"];
     /** Enable agent access requests — agents can request permission for denied actions. */
     accessRequests?: AccessRequestConfig;
+    /**
+     * When true, capability calls return ConstraintAwareResult envelopes instead of
+     * raw results/errors. This gives AI agents full visibility into constraint violations,
+     * permission flows, and active constraints. The agent can then explicitly call the
+     * built-in `request_permission` capability to request human approval.
+     *
+     * Requires `accessRequests` to be configured for the permission request flow.
+     * Default: false (backwards compatible — raw results and thrown errors).
+     */
+    constraintAware?: boolean;
 };
 
 export type ChainStats = {

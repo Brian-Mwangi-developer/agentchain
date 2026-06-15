@@ -51,6 +51,10 @@ export type {
     ConstraintOperator,
     ConstraintValue,
     ConstraintPrimitive,
+    ConstraintAwareResult,
+    ConstraintViolationDetail,
+    PermissionStatus,
+    PermissionGrant,
 } from "./types/capabilities.js";
 
 // ─── Types: protocol (wire format) ───────────────────────────────────────────

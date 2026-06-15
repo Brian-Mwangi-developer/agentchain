@@ -1,6 +1,8 @@
-/** Proxy wrapper for arbitrary service objects. Registered methods are auth-gated via CapabilityRegistry.
- *  If a Capability has an `execute` function, it is called. Otherwise, the target's own method is called.
- *  When access requests are enabled, denied calls suspend and wait for human approval. */
+/**
+ * Proxy wrapper for arbitrary service objects. Registered methods are auth-gated via CapabilityRegistry.
+ * If a Capability has an `execute` function, it is called. Otherwise, the target's own method is called.
+ * When constraintAware is enabled, violations return structured results instead of throwing.
+ */
 
 import { ChainAuthError } from "../errors/chain-error.js";
 import { enforceConstraints } from "../auth/constraints.js";
@@ -10,7 +12,7 @@ import type { TokenBuilder } from "../auth/token-builder.js";
 import type { TokenVerifier } from "../auth/token-verifier.js";
 import type { AgentIdentity } from "../identity/agent-identity.js";
 import type { ResolvedGrant } from "../types/protocol.js";
-import type { AgentContext, GrantConstraints } from "../types/capabilities.js";
+import type { AgentContext, GrantConstraints, ConstraintAwareResult } from "../types/capabilities.js";
 import type { AccessRequestManager } from "../access/access-request-manager.js";
 import type { ApprovalStore } from "../access/approval-store.js";
 import type { ApprovalDecision } from "../types/access-request.js";
@@ -25,6 +27,8 @@ export type AppInterceptContext = {
     accessRequestManager?: AccessRequestManager;
     /** Stores approved rules so future calls don't re-prompt. */
     approvalStore?: ApprovalStore;
+    /** When true, return ConstraintAwareResult envelopes instead of raw results/errors. */
+    constraintAware?: boolean;
 };
 
 export function wrapApp<T extends object>(
@@ -43,7 +47,6 @@ export function wrapApp<T extends object>(
                 return value;
             }
 
-            // Gate through auth. If capability has execute, use it; otherwise fall through to target method.
             const targetFn = typeof value === "function" ? (value as Function).bind(obj) : undefined;
             return createInterceptedMethod(capability.name, ctx, targetFn);
         },
@@ -62,9 +65,9 @@ function createInterceptedMethod(
 }
 
 /**
- * Core execution logic. Separated so it can be re-invoked after approval
- * without losing context — the callArgs, capability, and targetFn are all
- * captured in the closure.
+ * Core execution logic with auth, constraints, and optional access request flow.
+ * When constraintAware mode is enabled, returns ConstraintAwareResult envelopes
+ * instead of raw results/errors.
  */
 async function executeWithAccessRequest(
     capabilityName: string,
@@ -93,15 +96,12 @@ async function executeWithAccessRequest(
         );
 
         if (grant?.constraints) {
-            // Check if any approval rules expand these constraints
             const effectiveConstraints = getEffectiveConstraints(
                 capabilityName, grant.constraints, ctx.approvalStore
             );
-
             if (effectiveConstraints) {
                 enforceConstraints(effectiveConstraints, callArgs, registryEntry.inputSchema);
             }
-            // effectiveConstraints === null means a "capability"/"global" rule removed all constraints
         }
 
         const agentContext: AgentContext = {
@@ -112,7 +112,6 @@ async function executeWithAccessRequest(
                 .map((g) => g.capability),
         };
 
-        // If Capability defines execute, use it. Otherwise, delegate to the target's method.
         const executeFn = registryEntry.execute
             ? (a: unknown) => registryEntry.execute!(a, agentContext)
             : targetFn
@@ -150,16 +149,55 @@ async function executeWithAccessRequest(
             authOverheadMs,
         });
 
+        if (ctx.constraintAware) {
+            return {
+                success: true,
+                result,
+                permission: "not_required",
+                guidance: "Call succeeded. No constraint violations.",
+                capability: capabilityName,
+            } satisfies ConstraintAwareResult;
+        }
+
         return result;
     } catch (err) {
         if (err instanceof ChainAuthError) {
-            // ── Access Request Flow ──────────────────────────────────────
-            // If access requests are enabled, instead of throwing immediately,
-            // we suspend the call and wait for human approval.
+            if (ctx.constraintAware && isRequestableError(err)) {
+                const grant = ctx.grants.find(
+                    (g) => g.capability === capabilityName && g.status === "active"
+                );
+
+                ctx.log.recordDenied({
+                    agentId: ctx.identity.agentId,
+                    agentName: ctx.identity.registration.agentName,
+                    hostname: ctx.identity.registration.hostname,
+                    hostThumbprint: ctx.identity.registration.hostThumbprint,
+                    capability: capabilityName,
+                    args: callArgs,
+                    reason: `[constraint_aware] ${err.message}`,
+                    jti,
+                    authOverheadMs: Date.now() - authStart,
+                });
+
+                const hasAccessRequests = !!ctx.accessRequestManager;
+                const guidance = hasAccessRequests
+                    ? `Constraint violated on capability "${capabilityName}". You may call the "request_permission" tool with { capability: "${capabilityName}", args: <your original args>, reason: "<why you need this>" } to request human approval. The request will be reviewed by a human operator.`
+                    : `Constraint violated on capability "${capabilityName}". The access request system is not available. Adjust your parameters to match the active constraints.`;
+
+                return {
+                    success: false,
+                    permission: "constraint_violated",
+                    violations: err.structuredViolations,
+                    guidance,
+                    capability: capabilityName,
+                    activeConstraints: grant?.constraints as Record<string, unknown> | undefined,
+                } satisfies ConstraintAwareResult;
+            }
+
+            // Legacy access request flow (constraintAware=false)
             if (ctx.accessRequestManager && isRequestableError(err)) {
                 const { violatedField, violatedValue } = extractViolationDetails(err);
 
-                // Check if there's already an approval rule that covers this
                 if (ctx.approvalStore) {
                     const existingRule = ctx.approvalStore.findMatchingRule(
                         ctx.identity.agentId,
@@ -169,15 +207,10 @@ async function executeWithAccessRequest(
                         violatedValue
                     );
                     if (existingRule) {
-                        // Rule exists but constraint enforcement still failed —
-                        // this shouldn't happen if getEffectiveConstraints worked.
-                        // Re-execute with fresh auth token (the approval rule
-                        // will take effect via getEffectiveConstraints).
                         return executeWithAccessRequest(capabilityName, callArgs, ctx, targetFn);
                     }
                 }
 
-                // Log the denial before suspending
                 ctx.log.recordDenied({
                     agentId: ctx.identity.agentId,
                     agentName: ctx.identity.registration.agentName,
@@ -190,8 +223,6 @@ async function executeWithAccessRequest(
                     authOverheadMs: Date.now() - authStart,
                 });
 
-                // Create the access request and SUSPEND — the promise won't
-                // resolve until the human approves/denies/expires.
                 const { request, waitForApproval } = await ctx.accessRequestManager.createRequest({
                     agentId: ctx.identity.agentId,
                     agentName: ctx.identity.registration.agentName,
@@ -204,19 +235,14 @@ async function executeWithAccessRequest(
                     violatedValue,
                 });
 
-                // Block here — the agent's call is suspended.
-                // Context is preserved: capabilityName, callArgs, ctx, targetFn
-                // are all in the closure. When the promise resolves, we re-execute.
                 const approvalResult = await waitForApproval as {
                     approved: boolean;
                     decision: ApprovalDecision;
                 };
 
-                // Human approved — create the approval rule
                 if (approvalResult.approved && ctx.approvalStore) {
                     const rule = ctx.approvalStore.createRule(request, approvalResult.decision);
 
-                    // For "call" scope, execute once then remove the rule
                     if (approvalResult.decision.scope === "call") {
                         const result = await executeWithAccessRequest(
                             capabilityName, callArgs, ctx, targetFn
@@ -226,11 +252,9 @@ async function executeWithAccessRequest(
                     }
                 }
 
-                // Re-execute with the new approval rule in place
                 return executeWithAccessRequest(capabilityName, callArgs, ctx, targetFn);
             }
 
-            // No access request manager — throw as before
             ctx.log.recordDenied({
                 agentId: ctx.identity.agentId,
                 agentName: ctx.identity.registration.agentName,
@@ -248,21 +272,16 @@ async function executeWithAccessRequest(
     }
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/** Only constraint_violated and capability_denied can trigger access requests. */
 function isRequestableError(err: ChainAuthError): boolean {
     return err.code === "constraint_violated" || err.code === "capability_denied";
 }
 
-/** Extract which field/value was violated from the error message. */
 function extractViolationDetails(err: ChainAuthError): {
     violatedField?: string;
     violatedValue?: unknown;
 } {
     if (err.code !== "constraint_violated") return {};
 
-    // Parse field name from messages like: field "to": "..." is not in allowed list [...]
     const fieldMatch = err.message.match(/field "([^"]+)"/);
     const valueMatch = err.message.match(/field "[^"]+": "([^"]*)"/) ??
                        err.message.match(/field "[^"]+": (\S+)/);
@@ -278,7 +297,7 @@ function extractViolationDetails(err: ChainAuthError): {
  * Returns null if a capability/global rule removes all constraints.
  * Returns the original constraints if no expansions apply.
  */
-function getEffectiveConstraints(
+export function getEffectiveConstraints(
     capability: string,
     grantConstraints: GrantConstraints,
     approvalStore?: ApprovalStore
@@ -286,18 +305,13 @@ function getEffectiveConstraints(
     if (!approvalStore) return grantConstraints;
 
     const expansions = approvalStore.getExpandedConstraints(capability);
-    if (expansions === null) {
-        // A capability/global rule removed all constraints
-        return null;
-    }
+    if (expansions === null) return null;
+    if (expansions === undefined) return grantConstraints;
 
-    if (expansions === undefined) return grantConstraints; // No rules found — keep original
-
-    // Merge expansions into a copy of the grant constraints
     const merged = { ...grantConstraints };
     for (const [field, expansion] of Object.entries(expansions)) {
         const existing = merged[field];
-        if (!existing) continue; // Don't add new constraints, only expand existing ones
+        if (!existing) continue;
 
         if (typeof existing === "object" && !Array.isArray(existing) &&
             typeof expansion === "object" && !Array.isArray(expansion)) {
@@ -306,12 +320,10 @@ function getEffectiveConstraints(
 
             const mergedOp = { ...existingOp };
 
-            // Expand `in` lists
             if (expOp.in && mergedOp.in) {
                 mergedOp.in = [...new Set([...mergedOp.in, ...expOp.in])];
             }
 
-            // Remove approved values from `not_in`
             if (expOp.in && mergedOp.not_in) {
                 mergedOp.not_in = mergedOp.not_in.filter(
                     (v) => !expOp.in!.includes(v)
@@ -319,7 +331,6 @@ function getEffectiveConstraints(
                 if (mergedOp.not_in.length === 0) delete mergedOp.not_in;
             }
 
-            // Expand max/min bounds
             if (expOp.max !== undefined && mergedOp.max !== undefined) {
                 mergedOp.max = Math.max(mergedOp.max, expOp.max);
             }
@@ -334,8 +345,6 @@ function getEffectiveConstraints(
     return merged;
 }
 
-// Helper — we need registry access at intercept time.
-// We store it on the context via a symbol to keep the type clean.
 const REGISTRY_SYM = Symbol("registry");
 
 export function attachRegistry(ctx: AppInterceptContext, registry: CapabilityRegistry): void {

@@ -1,15 +1,13 @@
-/** Append-only audit log capped at 1000 entries. Secret keys in args are auto-redacted.
- *  Uses an in-memory buffer for O(1) appends; encrypts to store on drain/getAll. */
+/** Append-only audit log. Secret keys in args are auto-redacted. */
 
 import { generateId } from "../crypto/utils.js";
 import type { EncryptedStore } from "../memory/encrypted-store.js";
 import type { AuditEntry, AuditResult } from "../types/audit.js";
 import type { VerifiedCallContext } from "../auth/token-verifier.js";
 import type { AuditExporter } from "./audit-exporter.js";
+import type { ApprovalScope } from "../types/access-request.js";
 
 const STORE_KEY_LOG = "audit:log";
-
-/** Maximum number of entries held in memory before oldest are evicted. */
 const MAX_ENTRIES = 1000;
 
 export type RecordDeniedOptions = {
@@ -31,6 +29,29 @@ export type RecordCallOptions = {
     durationMs: number;
     errorMessage?: string;
     authOverheadMs: number;
+};
+
+export type RecordAccessRequestedOptions = {
+    agentId: string;
+    agentName: string;
+    hostname: string;
+    hostThumbprint: string;
+    capability: string;
+    args: Record<string, unknown>;
+    reason: string;
+    accessRequestId: string;
+};
+
+export type RecordAccessResolvedOptions = {
+    agentId: string;
+    agentName: string;
+    hostname: string;
+    hostThumbprint: string;
+    capability: string;
+    args: Record<string, unknown>;
+    accessRequestId: string;
+    resolution: "access_approved" | "access_denied";
+    approvalScope?: ApprovalScope;
 };
 
 export class AuditLog {
@@ -82,6 +103,50 @@ export class AuditLog {
         return entry;
     }
 
+    /** Record that an access request was created (agent is waiting for human approval). */
+    recordAccessRequested(opts: RecordAccessRequestedOptions): AuditEntry {
+        const entry: AuditEntry = {
+            id: generateId("aud"),
+            agentId: opts.agentId,
+            agentName: opts.agentName,
+            hostname: opts.hostname,
+            hostThumbprint: opts.hostThumbprint,
+            capability: opts.capability,
+            args: sanitizeArgs(opts.args),
+            result: "access_requested",
+            denialReason: opts.reason,
+            accessRequestId: opts.accessRequestId,
+            jti: "access_request",
+            timestamp: Date.now(),
+            durationMs: 0,
+            authOverheadMs: 0,
+        };
+        this.appendCapped(entry);
+        return entry;
+    }
+
+    /** Record the resolution of an access request (approved or denied by human). */
+    recordAccessResolved(opts: RecordAccessResolvedOptions): AuditEntry {
+        const entry: AuditEntry = {
+            id: generateId("aud"),
+            agentId: opts.agentId,
+            agentName: opts.agentName,
+            hostname: opts.hostname,
+            hostThumbprint: opts.hostThumbprint,
+            capability: opts.capability,
+            args: sanitizeArgs(opts.args),
+            result: opts.resolution,
+            accessRequestId: opts.accessRequestId,
+            approvalScope: opts.approvalScope,
+            jti: "access_resolution",
+            timestamp: Date.now(),
+            durationMs: 0,
+            authOverheadMs: 0,
+        };
+        this.appendCapped(entry);
+        return entry;
+    }
+
     getAll(): AuditEntry[] {
         this.ensureLoaded();
         return [...this.buffer];
@@ -111,7 +176,6 @@ export class AuditLog {
         this.store.set(STORE_KEY_LOG, [] as AuditEntry[]);
     }
 
-    /** Flush the in-memory buffer to the encrypted store. */
     flush(): void {
         this.store.set(STORE_KEY_LOG, this.buffer);
     }

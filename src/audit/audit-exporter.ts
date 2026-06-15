@@ -1,13 +1,10 @@
-/** AuditExporter interface + ConsoleAuditExporter (stdout) and HttpAuditExporter (POST batches). */
+/** AuditExporter interface + ConsoleAuditExporter and HttpAuditExporter implementations. */
 
 import type { AuditEntry } from "../types/audit.js";
 
 export interface AuditExporter {
     export(entries: AuditEntry[]): Promise<void>;
 }
-
-// ─── ConsoleAuditExporter ─────────────────────────────────────────────────────
-
 
 export class ConsoleAuditExporter implements AuditExporter {
     async export(entries: AuditEntry[]): Promise<void> {
@@ -20,8 +17,6 @@ export class ConsoleAuditExporter implements AuditExporter {
     }
 }
 
-// ─── HttpAuditExporter ────────────────────────────────────────────────────────
-
 export type HttpAuditExporterConfig = {
     endpoint: string;
     apiKey?: string;
@@ -31,7 +26,6 @@ export type HttpAuditExporterConfig = {
     /** Default: 10_000 */
     timeoutMs?: number;
 };
-
 
 export class HttpAuditExporter implements AuditExporter {
     private readonly batchSize: number;
@@ -56,7 +50,7 @@ export class HttpAuditExporter implements AuditExporter {
             await this.sendBatch(batch);
         }
     }
-    //NOTEBRIAN: shouldn't we have a signal is res is Ok?
+
     private async sendBatch(batch: AuditEntry[]): Promise<void> {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), this.timeoutMs);

@@ -1,5 +1,4 @@
-/** ApprovalStore — encrypted store for approval rules. Agent cannot write directly;
- *  only the AccessRequestManager (via verified HMAC codes) can create rules. */
+/** ApprovalStore — encrypted store for approval rules. Only the AccessRequestManager (via verified HMAC codes) can create rules. */
 
 import { createHmac } from "node:crypto";
 import { generateId } from "../crypto/utils.js";
@@ -12,9 +11,7 @@ const INTEGRITY_KEY = "approval_rules_integrity";
 
 export class ApprovalStore {
     private readonly store: EncryptedStore;
-    /** HMAC secret for integrity — same secret as AccessRequestManager. */
     private readonly secret: Buffer;
-    /** In-memory cache of rules (source of truth is the encrypted store). */
     private rules: ApprovalRule[] = [];
 
     constructor(store: EncryptedStore, secret: Buffer) {
@@ -23,12 +20,7 @@ export class ApprovalStore {
         this.load();
     }
 
-    // ─── Create Rule from Approved Request ───────────────────────────────────
-
-    /**
-     * Called ONLY after HMAC-verified approval. Creates the appropriate rule
-     * based on the approval scope.
-     */
+    /** Called after HMAC-verified approval. Creates the appropriate rule based on the approval scope. */
     createRule(request: AccessRequest, decision: ApprovalDecision): ApprovalRule {
         const now = Date.now();
         let expiresAt: number | undefined;
@@ -38,8 +30,6 @@ export class ApprovalStore {
         } else if (decision.ttl?.durationMs) {
             expiresAt = now + decision.ttl.durationMs;
         }
-        // No TTL + session scope = no expiresAt (lives for the session)
-        // No TTL + global scope = no expiresAt (lives forever until revoked)
 
         const rule: ApprovalRule = {
             ruleId: generateId("arule"),
@@ -51,13 +41,11 @@ export class ApprovalStore {
             global: decision.scope === "global",
         };
 
-        // For "value" scope — record the specific field/value that was approved
-        if (decision.scope === "value" && request.violatedField != null) {
+        if ((decision.scope === "value" || decision.scope === "call") && request.violatedField != null) {
             rule.field = request.violatedField;
             rule.value = request.violatedValue;
         }
 
-        // For constraint expansion
         if (decision.expandConstraints) {
             rule.expandedConstraints = decision.expandConstraints;
         }
@@ -68,12 +56,7 @@ export class ApprovalStore {
         return rule;
     }
 
-    // ─── Query Rules ─────────────────────────────────────────────────────────
-
-    /**
-     * Check if there's an active approval rule that covers this capability + args.
-     * Returns the matching rule, or null if none found.
-     */
+    /** Check if there's an active approval rule that covers this capability + args. */
     findMatchingRule(
         agentId: string,
         capability: string,
@@ -86,29 +69,17 @@ export class ApprovalStore {
         for (const rule of this.rules) {
             if (rule.capability !== capability) continue;
 
-            // Global rules apply to any agent
-            // Non-global rules only apply via the approval flow (we don't store agentId
-            // on the rule because session rules are per-chain, not per-agent)
-
             switch (rule.scope) {
                 case "call":
-                    // One-time rules are consumed immediately — they shouldn't be in the store
-                    // after use. If somehow one is here, skip it.
                     continue;
-
                 case "value":
-                    // Match if the violated field+value matches this rule
                     if (rule.field === violatedField && this.valueMatches(rule.value, violatedValue)) {
                         return rule;
                     }
                     break;
-
                 case "capability":
-                    // Blanket approval for this capability — always matches
                     return rule;
-
                 case "global":
-                    // Blanket approval for all agents on this capability
                     return rule;
             }
         }
@@ -118,16 +89,11 @@ export class ApprovalStore {
 
     /**
      * Get the expanded constraints from all active rules for a capability.
-     * These get merged into the grant constraints before enforcement.
-     */
-    /**
-     * Get the expanded constraints from all active rules for a capability.
-     * These get merged into the grant constraints before enforcement.
      *
      * Returns:
-     * - `null`      → a capability/global rule bypasses ALL constraints
-     * - `undefined`  → no matching rules found, no expansions (use original constraints)
-     * - `GrantConstraints` → merged expansions to apply on top of the grant constraints
+     * - `null` — a capability/global rule bypasses ALL constraints
+     * - `undefined` — no matching rules found (use original constraints)
+     * - `GrantConstraints` — merged expansions to apply on top of the grant constraints
      */
     getExpandedConstraints(capability: string): GrantConstraints | null | undefined {
         this.sweepExpired();
@@ -138,12 +104,10 @@ export class ApprovalStore {
         for (const rule of this.rules) {
             if (rule.capability !== capability) continue;
 
-            // "capability" and "global" scopes bypass constraints entirely
             if (rule.scope === "capability" || rule.scope === "global") {
-                return null; // null = no constraints (all allowed)
+                return null;
             }
 
-            // Merge expanded constraints
             if (rule.expandedConstraints) {
                 for (const [field, constraint] of Object.entries(rule.expandedConstraints)) {
                     merged[field] = this.mergeConstraintValue(merged[field], constraint);
@@ -151,9 +115,6 @@ export class ApprovalStore {
                 }
             }
 
-            // For "value" and "call" scope, expand the `in` list for that field.
-            // "call" scope needs this too — without it the re-execution hits the
-            // same constraint violation and creates an infinite access request loop.
             if ((rule.scope === "value" || rule.scope === "call") && rule.field && rule.value !== undefined) {
                 const existing = merged[rule.field];
                 if (existing && typeof existing === "object" && !Array.isArray(existing)) {
@@ -162,7 +123,6 @@ export class ApprovalStore {
                         op.in.push(rule.value as ConstraintPrimitive);
                     }
                 } else {
-                    // Create a new `in` constraint with just this value
                     merged[rule.field] = { in: [rule.value as ConstraintPrimitive] };
                 }
                 hasExpansions = true;
@@ -171,8 +131,6 @@ export class ApprovalStore {
 
         return hasExpansions ? merged : undefined;
     }
-
-    // ─── Revoke ──────────────────────────────────────────────────────────────
 
     revokeRule(ruleId: string): boolean {
         const idx = this.rules.findIndex((r) => r.ruleId === ruleId);
@@ -201,11 +159,8 @@ export class ApprovalStore {
         return [...this.rules];
     }
 
-    // ─── Persistence (tamper-proof) ──────────────────────────────────────────
-
     private persist(): void {
         this.store.set(STORE_KEY, this.rules);
-        // Write HMAC integrity tag so we can detect tampering
         const integrity = this.computeIntegrity(this.rules);
         this.store.set(INTEGRITY_KEY, integrity);
     }
@@ -217,8 +172,6 @@ export class ApprovalStore {
             return;
         }
 
-        // Verify integrity — if the agent somehow wrote to the store directly,
-        // the HMAC won't match and we reject all rules.
         const storedIntegrity = this.store.get<string>(INTEGRITY_KEY);
         const computed = this.computeIntegrity(rules);
         if (storedIntegrity !== computed) {
@@ -236,8 +189,6 @@ export class ApprovalStore {
         return createHmac("sha256", this.secret).update(payload).digest("hex");
     }
 
-    // ─── Helpers ─────────────────────────────────────────────────────────────
-
     private sweepExpired(): void {
         const now = Date.now();
         const before = this.rules.length;
@@ -249,7 +200,6 @@ export class ApprovalStore {
 
     private valueMatches(ruleValue: unknown, actual: unknown): boolean {
         if (ruleValue === actual) return true;
-        // Deep comparison for objects
         return JSON.stringify(ruleValue) === JSON.stringify(actual);
     }
 
@@ -259,7 +209,6 @@ export class ApprovalStore {
     ): import("../types/capabilities.js").ConstraintValue {
         if (!existing) return incoming;
 
-        // If both are operators, merge their lists
         if (typeof existing === "object" && typeof incoming === "object") {
             const merged = { ...existing } as ConstraintOperator;
             const inc = incoming as ConstraintOperator;
@@ -267,7 +216,6 @@ export class ApprovalStore {
                 merged.in = [...new Set([...(merged.in ?? []), ...inc.in])];
             }
             if (inc.not_in) {
-                // Remove from not_in if we're approving it
                 merged.not_in = (merged.not_in ?? []).filter(
                     (v) => !inc.in?.includes(v)
                 );
@@ -278,7 +226,6 @@ export class ApprovalStore {
             return merged;
         }
 
-        // Incoming takes precedence for primitives
         return incoming;
     }
 }

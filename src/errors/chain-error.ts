@@ -10,6 +10,8 @@
  *   "agent_not_found"     — agentId in the JWT does not match registered agent
  */
 
+import type { ConstraintViolationDetail } from "../types/capabilities.js";
+
 export type ChainErrorCode =
     | "capability_denied"
     | "constraint_violated"
@@ -24,12 +26,15 @@ export type ChainErrorCode =
 export class ChainAuthError extends Error {
     readonly code: ChainErrorCode;
     readonly violations?: string[];
+    /** Structured violation details for constraint-aware mode. */
+    readonly structuredViolations?: ConstraintViolationDetail[];
 
-    constructor(code: ChainErrorCode, message: string, violations?: string[]) {
+    constructor(code: ChainErrorCode, message: string, violations?: string[], structuredViolations?: ConstraintViolationDetail[]) {
         super(message);
         this.name = "ChainAuthError";
         this.code = code;
         this.violations = violations;
+        this.structuredViolations = structuredViolations;
         // Maintain proper prototype chain for instanceof checks
         Object.setPrototypeOf(this, ChainAuthError.prototype);
     }
