@@ -13,6 +13,7 @@ const sidebars: SidebarsConfig = {
         'concepts/grants-and-constraints',
         'concepts/verification-pipeline',
         'concepts/audit-log',
+        'concepts/context-awareness',
       ],
     },
     {
