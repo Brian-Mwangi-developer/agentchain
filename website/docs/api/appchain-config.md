@@ -32,6 +32,7 @@ type AppChainConfig = {
   storeAdapter?: StorePersistenceAdapter;
   grantResolver?: (agentId: string, capability: string) => Promise<ResolvedGrant | undefined>;
   auditExporter?: AuditExporter;
+  traceExporter?: TraceExporter;
 
   // Access request system
   accessRequests?: {
@@ -70,6 +71,7 @@ type AppChainConfig = {
 | `storeAdapter` | Redis/database adapter for persistent `EncryptedStore` |
 | `grantResolver` | Dynamic grant lookup from your database |
 | `auditExporter` | Where to drain audit entries (`ConsoleAuditExporter`, `HttpAuditExporter`, or custom) |
+| `traceExporter` | Default exporter for `closeTrace()` — ships completed `TraceRun` objects (`ConsoleTraceExporter`, `HttpTraceExporter`, or custom) |
 
 ## Access Request Fields
 
@@ -83,7 +85,9 @@ type AppChainConfig = {
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `wrap(target, grants)` | `Proxy<T>` | Wraps a service object with the auth gate |
+| `wrap(target, grants, traceId?)` | `Proxy<T>` | Wraps a service object with the auth gate; pass `traceId` to group spans |
+| `openTrace()` | `string` | Open a new trace run; returns `traceId` |
+| `closeTrace(traceId, status, exporter?)` | `Promise<TraceRun \| undefined>` | Close trace and export the completed run |
 | `getAuditLog()` | `AuditEntry[]` | All audit entries |
 | `getStats()` | `ChainStats` | Summary statistics |
 | `drain(exporter?)` | `Promise<void>` | Export and clear audit buffer |

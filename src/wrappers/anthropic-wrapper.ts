@@ -2,6 +2,7 @@
 
 import { ChainAuthError } from "../errors/chain-error.js";
 import { enforceConstraints } from "../auth/constraints.js";
+import { extractModelMetadata } from "../trace/model-extractors.js";
 import type { TokenBuilder } from "../auth/token-builder.js";
 import type { TokenVerifier } from "../auth/token-verifier.js";
 import type { AuditLog } from "../audit/audit-log.js";
@@ -22,6 +23,8 @@ type InterceptContext = {
     verifier: TokenVerifier;
     log: AuditLog;
     grants?: ResolvedGrant[];
+    /** Active trace ID — if set, spans are appended to the trace run */
+    traceId?: string;
 };
 
 export function wrapAnthropic<T extends object>(client: T, ctx: InterceptContext): T {
@@ -93,9 +96,11 @@ function createInterceptedMethod(
                     durationMs: Date.now() - callStart,
                     errorMessage: sdkErr instanceof Error ? sdkErr.message : String(sdkErr),
                     authOverheadMs,
-                });
+                }, ctx.traceId);
                 throw sdkErr;
             }
+
+            const modelMetadata = extractModelMetadata(result, callArgs);
 
             ctx.log.recordCall({
                 context: verified,
@@ -103,7 +108,8 @@ function createInterceptedMethod(
                 result: "success",
                 durationMs: Date.now() - callStart,
                 authOverheadMs,
-            });
+                modelMetadata,
+            }, ctx.traceId);
 
             return result;
         } catch (err) {
@@ -118,7 +124,7 @@ function createInterceptedMethod(
                     reason: err.message,
                     jti,
                     authOverheadMs: Date.now() - authStart,
-                });
+                }, ctx.traceId);
                 throw err;
             }
             throw err;

@@ -20,4 +20,6 @@ export type AuditEntry = {
     accessRequestId?: string;
     /** The approval scope that was applied (for access_approved). */
     approvalScope?: import("./access-request.js").ApprovalScope;
+    /** LLM metadata extracted by the wrapper, if this entry came from an LLM call. */
+    modelMetadata?: import("./trace.js").ModelMetadata;
 };

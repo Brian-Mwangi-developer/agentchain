@@ -34,8 +34,12 @@ agents-chain/
 │   └── approval-store.ts          Encrypted + HMAC-integrity rule storage
 │
 ├── audit/
-│   ├── audit-log.ts             AuditLog — in-memory buffer, AES-256-GCM
-│   └── audit-exporter.ts        Console + HTTP exporters
+│   ├── audit-log.ts             AuditLog — in-memory buffer, AES-256-GCM, trace lifecycle
+│   ├── audit-exporter.ts        Console + HTTP audit exporters
+│   └── trace-exporter.ts        ConsoleTraceExporter + HttpTraceExporter
+│
+├── trace/
+│   └── model-extractors.ts      Built-in Anthropic/OpenAI ModelMetadataExtractor, extractor registry
 │
 ├── memory/
 │   ├── encrypted-store.ts       EncryptedStore — AES-256-GCM Map
@@ -58,7 +62,8 @@ agents-chain/
     ├── identity.ts              RegisteredAgent, CapabilityGrant
     ├── audit.ts                 AuditEntry, AuditResult
     ├── protocol.ts              ResolvedGrant, AgentConfiguration
-    └── access-request.ts        AccessRequest, ApprovalScope, ApprovalRule
+    ├── access-request.ts        AccessRequest, ApprovalScope, ApprovalRule
+    └── trace.ts                 TraceRun, TraceSpan, ModelMetadata, ModelMetadataExtractor
 ```
 
 ## AppChain Creation Flow
@@ -106,6 +111,31 @@ sequenceDiagram
     Proxy->>Cap: execute(args, agentContext)
     Cap-->>Proxy: result
     Proxy-->>Agent: result
+```
+
+## Trace Data Flow
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant Chain as AppChain / AgentsChain
+    participant AuditLog
+    participant Wrapper as app-wrapper / SDK wrapper
+
+    App->>Chain: openTrace()
+    Chain->>AuditLog: openTrace(agentId, agentName, hostThumbprint)
+    AuditLog-->>Chain: traceId
+
+    App->>Chain: wrap(service, grants, traceId)
+    App->>Wrapper: secured.capability(args)
+    Wrapper->>AuditLog: recordCall(..., traceId)
+    Note over AuditLog: appendSpan() → stored in activeTraces map
+
+    App->>Chain: closeTrace(traceId, status, exporter?)
+    Chain->>AuditLog: closeTrace(traceId, status, exporter)
+    Note over AuditLog: buildSummary(spans) → TraceRun assembled
+    AuditLog->>App: TraceRun
+    Note over AuditLog: if exporter provided → exporter.export(run)
 ```
 
 ## Shared State

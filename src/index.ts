@@ -19,6 +19,29 @@ export type { AppInterceptContext } from "./app/app-wrapper.js";
 export { ConsoleAuditExporter, HttpAuditExporter } from "./audit/audit-exporter.js";
 export type { AuditExporter, HttpAuditExporterConfig } from "./audit/audit-exporter.js";
 
+
+export { ConsoleTraceExporter, HttpTraceExporter } from "./audit/trace-exporter.js";
+export type { TraceExporter, HttpTraceExporterConfig } from "./audit/trace-exporter.js";
+
+
+export type {
+    ModelMetadata,
+    ModelMetadataExtractor,
+    TraceSpan,
+    TraceSpanResult,
+    TraceRun,
+    TraceRunStatus,
+    TraceRunSummary,
+} from "./types/trace.js";
+
+
+export {
+    anthropicExtractor,
+    openaiExtractor,
+    registerExtractor,
+    extractModelMetadata,
+} from "./trace/model-extractors.js";
+
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
 export { ChainAuthError, isChainAuthError } from "./errors/chain-error.js";

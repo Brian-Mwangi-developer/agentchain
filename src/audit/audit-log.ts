@@ -3,9 +3,12 @@
 import { generateId } from "../crypto/utils.js";
 import type { EncryptedStore } from "../memory/encrypted-store.js";
 import type { AuditEntry, AuditResult } from "../types/audit.js";
+import type { TraceRun, TraceSpan, TraceRunStatus } from "../types/trace.js";
 import type { VerifiedCallContext } from "../auth/token-verifier.js";
 import type { AuditExporter } from "./audit-exporter.js";
+import type { TraceExporter } from "./trace-exporter.js";
 import type { ApprovalScope } from "../types/access-request.js";
+import type { ModelMetadata } from "../types/trace.js";
 
 const STORE_KEY_LOG = "audit:log";
 const MAX_ENTRIES = 1000;
@@ -29,6 +32,8 @@ export type RecordCallOptions = {
     durationMs: number;
     errorMessage?: string;
     authOverheadMs: number;
+    /** Model metadata attached by the LLM wrapper, if applicable */
+    modelMetadata?: ModelMetadata;
 };
 
 export type RecordAccessRequestedOptions = {
@@ -54,16 +59,92 @@ export type RecordAccessResolvedOptions = {
     approvalScope?: ApprovalScope;
 };
 
+// ─── Active trace context (in-memory only, not persisted) ─────────────────────
+
+type ActiveTrace = {
+    traceId: string;
+    agentId: string;
+    agentName: string;
+    hostThumbprint: string;
+    startedAt: number;
+    spans: TraceSpan[];
+};
+
 export class AuditLog {
     private readonly store: EncryptedStore;
     private buffer: AuditEntry[] = [];
     private loaded = false;
+    private activeTraces = new Map<string, ActiveTrace>();
 
     constructor(store: EncryptedStore) {
         this.store = store;
     }
 
-    recordDenied(opts: RecordDeniedOptions): AuditEntry {
+    // ─── Trace lifecycle ────────────────────────────────────────────────────
+
+    /**
+     * Open a new trace run. Returns a traceId that must be passed to
+     * closeTrace() when the agent session ends.
+     * All recordCall/recordDenied calls made while a trace is open will
+     * attach a span to the corresponding TraceRun.
+     */
+    openTrace(agentId: string, agentName: string, hostThumbprint: string): string {
+        const traceId = generateId("trace");
+        this.activeTraces.set(traceId, {
+            traceId,
+            agentId,
+            agentName,
+            hostThumbprint,
+            startedAt: Date.now(),
+            spans: [],
+        });
+        return traceId;
+    }
+
+    /**
+     * Close the trace run and return the completed TraceRun.
+     * If a traceExporter is provided, the run is exported immediately.
+     * Returns undefined if the traceId is not found.
+     */
+    async closeTrace(
+        traceId: string,
+        status: TraceRunStatus,
+        traceExporter?: TraceExporter
+    ): Promise<TraceRun | undefined> {
+        const active = this.activeTraces.get(traceId);
+        if (!active) return undefined;
+
+        this.activeTraces.delete(traceId);
+
+        const endedAt = Date.now();
+        const run: TraceRun = {
+            traceId: active.traceId,
+            agentId: active.agentId,
+            agentName: active.agentName,
+            hostThumbprint: active.hostThumbprint,
+            status,
+            startedAt: active.startedAt,
+            endedAt,
+            totalDurationMs: endedAt - active.startedAt,
+            spans: active.spans,
+            summary: buildSummary(active.spans),
+        };
+
+        if (traceExporter) {
+            await traceExporter.export(run);
+        }
+
+        return run;
+    }
+
+    /** Returns the active trace for the given traceId, if any. */
+    getActiveTrace(traceId: string): Readonly<ActiveTrace> | undefined {
+        return this.activeTraces.get(traceId);
+    }
+
+    // ─── Record methods (existing API, now also append spans) ──────────────
+
+    recordDenied(opts: RecordDeniedOptions, traceId?: string): AuditEntry {
         const entry: AuditEntry = {
             id: generateId("aud"),
             agentId: opts.agentId,
@@ -80,10 +161,11 @@ export class AuditLog {
             authOverheadMs: opts.authOverheadMs,
         };
         this.appendCapped(entry);
+        this.appendSpan(traceId, entry);
         return entry;
     }
 
-    recordCall(opts: RecordCallOptions): AuditEntry {
+    recordCall(opts: RecordCallOptions, traceId?: string): AuditEntry {
         const entry: AuditEntry = {
             id: generateId("aud"),
             agentId: opts.context.agentId,
@@ -98,13 +180,14 @@ export class AuditLog {
             timestamp: Date.now(),
             durationMs: opts.durationMs,
             authOverheadMs: opts.authOverheadMs,
+            modelMetadata: opts.modelMetadata,
         };
         this.appendCapped(entry);
+        this.appendSpan(traceId, entry);
         return entry;
     }
 
-    /** Record that an access request was created (agent is waiting for human approval). */
-    recordAccessRequested(opts: RecordAccessRequestedOptions): AuditEntry {
+    recordAccessRequested(opts: RecordAccessRequestedOptions, traceId?: string): AuditEntry {
         const entry: AuditEntry = {
             id: generateId("aud"),
             agentId: opts.agentId,
@@ -122,11 +205,11 @@ export class AuditLog {
             authOverheadMs: 0,
         };
         this.appendCapped(entry);
+        this.appendSpan(traceId, entry);
         return entry;
     }
 
-    /** Record the resolution of an access request (approved or denied by human). */
-    recordAccessResolved(opts: RecordAccessResolvedOptions): AuditEntry {
+    recordAccessResolved(opts: RecordAccessResolvedOptions, traceId?: string): AuditEntry {
         const entry: AuditEntry = {
             id: generateId("aud"),
             agentId: opts.agentId,
@@ -144,8 +227,11 @@ export class AuditLog {
             authOverheadMs: 0,
         };
         this.appendCapped(entry);
+        this.appendSpan(traceId, entry);
         return entry;
     }
+
+    // ─── Existing query API ────────────────────────────────────────────────
 
     getAll(): AuditEntry[] {
         this.ensureLoaded();
@@ -180,6 +266,8 @@ export class AuditLog {
         this.store.set(STORE_KEY_LOG, this.buffer);
     }
 
+    // ─── Private ───────────────────────────────────────────────────────────
+
     private ensureLoaded(): void {
         if (!this.loaded) {
             this.buffer = this.store.get<AuditEntry[]>(STORE_KEY_LOG) ?? [];
@@ -194,6 +282,62 @@ export class AuditLog {
         }
         this.buffer.push(entry);
     }
+
+    private appendSpan(traceId: string | undefined, entry: AuditEntry): void {
+        if (!traceId) return;
+        const active = this.activeTraces.get(traceId);
+        if (!active) return;
+
+        const span: TraceSpan = {
+            spanId: entry.id,
+            capability: entry.capability,
+            result: entry.result as TraceSpan["result"],
+            startedAt: entry.timestamp,
+            durationMs: entry.durationMs,
+            authOverheadMs: entry.authOverheadMs,
+            jti: entry.jti,
+            args: entry.args,
+            denialReason: entry.denialReason,
+            errorMessage: entry.errorMessage,
+            accessRequestId: entry.accessRequestId,
+            approvalScope: entry.approvalScope,
+            modelMetadata: entry.modelMetadata,
+            toolCalls: entry.modelMetadata?.toolCalls,
+            stopReason: entry.modelMetadata?.stopReason,
+        };
+
+        active.spans.push(span);
+    }
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function buildSummary(spans: TraceSpan[]) {
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    const modelsUsed = new Set<string>();
+    const providersUsed = new Set<string>();
+
+    for (const span of spans) {
+        if (span.modelMetadata) {
+            totalInputTokens += span.modelMetadata.inputTokens ?? 0;
+            totalOutputTokens += span.modelMetadata.outputTokens ?? 0;
+            modelsUsed.add(span.modelMetadata.model);
+            providersUsed.add(span.modelMetadata.provider);
+        }
+    }
+
+    return {
+        totalSpans: spans.length,
+        successSpans: spans.filter((s) => s.result === "success").length,
+        deniedSpans: spans.filter((s) => s.result === "denied").length,
+        errorSpans: spans.filter((s) => s.result === "error").length,
+        totalInputTokens,
+        totalOutputTokens,
+        totalTokens: totalInputTokens + totalOutputTokens,
+        modelsUsed: [...modelsUsed],
+        providersUsed: [...providersUsed],
+    };
 }
 
 const SECRET_KEY_PATTERN = /(?:key|secret|token|password|auth|credential|bearer)/i;

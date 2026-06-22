@@ -7,6 +7,7 @@ import { attachRegistry, wrapApp } from "./app/app-wrapper.js";
 import { CapabilityRegistry } from "./app/capability-registry.js";
 import { createRequestPermissionCapability } from "./app/request-permission-capability.js";
 import type { AuditExporter } from "./audit/audit-exporter.js";
+import type { TraceExporter } from "./audit/trace-exporter.js";
 import { AuditLog } from "./audit/audit-log.js";
 import { TokenBuilder } from "./auth/token-builder.js";
 import { TokenVerifier } from "./auth/token-verifier.js";
@@ -16,6 +17,7 @@ import { EncryptedStore } from "./memory/encrypted-store.js";
 import { JtiCache } from "./memory/jti-cache.js";
 import type { AccessRequest, ApprovalDecision, ApprovalRule, DenialDecision } from "./types/access-request.js";
 import type { AuditEntry } from "./types/audit.js";
+import type { TraceRun, TraceRunStatus } from "./types/trace.js";
 import type { AgentConfig, AppChainConfig, AuditSnapshot, ChainStats } from "./types/chain.js";
 import type { AgentConfiguration, ResolvedGrant } from "./types/protocol.js";
 import { wrapAnthropic } from "./wrappers/anthropic-wrapper.js";
@@ -85,22 +87,51 @@ export class AgentsChain {
         this.jtiCache.destroy();
     }
 
-    openai<T extends object>(client: T): T {
+    openai<T extends object>(client: T, traceId?: string): T {
         return wrapOpenAI(client, {
             identity: this.identity,
             builder: this.builder,
             verifier: this.verifier,
             log: this.log,
+            traceId,
         });
     }
 
-    anthropic<T extends object>(client: T): T {
+    anthropic<T extends object>(client: T, traceId?: string): T {
         return wrapAnthropic(client, {
             identity: this.identity,
             builder: this.builder,
             verifier: this.verifier,
             log: this.log,
+            traceId,
         });
+    }
+
+    /**
+     * Open a new trace run. Call this at the start of an agent session.
+     * Pass the returned traceId to openai()/anthropic() so LLM calls are grouped.
+     * Call closeTrace() when the session ends to export the completed TraceRun.
+     */
+    openTrace(): string {
+        return this.log.openTrace(
+            this.identity.agentId,
+            this.identity.registration.agentName,
+            this.identity.registration.hostThumbprint
+        );
+    }
+
+    /**
+     * Close the trace run and optionally export it.
+     * @param traceId - The ID returned by openTrace()
+     * @param status - Overall outcome of the agent session
+     * @param traceExporter - Where to ship the completed TraceRun (overrides default)
+     */
+    async closeTrace(
+        traceId: string,
+        status: TraceRunStatus,
+        traceExporter?: TraceExporter
+    ): Promise<TraceRun | undefined> {
+        return this.log.closeTrace(traceId, status, traceExporter);
     }
 
 
@@ -167,6 +198,7 @@ export class AppChain {
     private readonly log: AuditLog;
     private readonly jtiCache: JtiCache;
     private readonly exporter?: AuditExporter;
+    private readonly _traceExporter?: TraceExporter;
     private readonly accessRequestManager?: AccessRequestManager;
     private readonly approvalStore?: ApprovalStore;
     private readonly _constraintAware: boolean;
@@ -182,7 +214,8 @@ export class AppChain {
         constraintAware: boolean,
         exporter?: AuditExporter,
         accessRequestManager?: AccessRequestManager,
-        approvalStore?: ApprovalStore
+        approvalStore?: ApprovalStore,
+        traceExporter?: TraceExporter
     ) {
         this.host = host;
         this.registry = registry;
@@ -193,6 +226,7 @@ export class AppChain {
         this.jtiCache = jtiCache;
         this._constraintAware = constraintAware;
         this.exporter = exporter;
+        this._traceExporter = traceExporter;
         this.accessRequestManager = accessRequestManager;
         this.approvalStore = approvalStore;
     }
@@ -317,7 +351,8 @@ export class AppChain {
 
         return new AppChain(
             host, registry, identity, builder, verifier, log, jtiCache,
-            constraintAware, config.auditExporter, accessRequestManager, approvalStoreInstance
+            constraintAware, config.auditExporter, accessRequestManager, approvalStoreInstance,
+            config.traceExporter
         );
     }
 
@@ -326,7 +361,7 @@ export class AppChain {
         this.accessRequestManager?.destroy();
     }
 
-    wrap<T extends object>(target: T, grants: ResolvedGrant[]): T {
+    wrap<T extends object>(target: T, grants: ResolvedGrant[], traceId?: string): T {
         // Auto-include grant for the built-in request_permission capability when
         // constraintAware mode is active. The caller's grants only cover their own
         // capabilities (e.g. send_sms) — request_permission is a system capability
@@ -354,6 +389,7 @@ export class AppChain {
             accessRequestManager: this.accessRequestManager,
             approvalStore: this.approvalStore,
             constraintAware: this._constraintAware,
+            traceId,
         };
         attachRegistry(ctx, this.registry);
         return wrapApp(target, this.registry, ctx);
@@ -499,6 +535,32 @@ export class AppChain {
             endpointPrefix,
             opts
         );
+    }
+
+    /**
+     * Open a new trace run for this AppChain session.
+     * Returns a traceId to pass into wrap() so all capability calls are grouped.
+     */
+    openTrace(): string {
+        return this.log.openTrace(
+            this.identity.agentId,
+            this.identity.registration.agentName,
+            this.identity.registration.hostThumbprint
+        );
+    }
+
+    /**
+     * Close the trace run and optionally export it.
+     * @param traceId - The ID returned by openTrace()
+     * @param status - Overall outcome of the agent session
+     * @param traceExporter - Where to ship the completed TraceRun (overrides default)
+     */
+    async closeTrace(
+        traceId: string,
+        status: TraceRunStatus,
+        traceExporter?: TraceExporter
+    ): Promise<TraceRun | undefined> {
+        return this.log.closeTrace(traceId, status, traceExporter ?? this._traceExporter);
     }
 
     getAuditLog(): AuditEntry[] {

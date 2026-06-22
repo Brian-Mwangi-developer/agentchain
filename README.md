@@ -1,6 +1,6 @@
 # agents-chain
 
-**v0.0.58** — Zero-dependency security layer for AI agent systems. Ed25519 identity, JWT auth, constraint enforcement, encrypted audit, human-in-the-loop access requests, and constraint-aware agent flows.
+**v0.0.58** — Zero-dependency security layer for AI agent systems. Ed25519 identity, JWT auth, constraint enforcement, encrypted audit, human-in-the-loop access requests, constraint-aware agent flows, and end-to-end agent session tracing.
 
 [![npm](https://img.shields.io/npm/v/agents-chain)](https://www.npmjs.com/package/agents-chain)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
@@ -25,6 +25,7 @@ npm install agents-chain
 - **Access requests** — denied calls suspend and wait for human approval out-of-band (HMAC-verified, 4 scopes)
 - **Constraint-aware mode** — returns structured violation envelopes so AI agents can reason about permissions and explicitly request approval
 - **Encrypted audit log** — AES-256-GCM ring buffer with auth overhead tracking, access request lifecycle events
+- **Session tracing** — `openTrace()` / `closeTrace()` groups all capability and LLM calls into a single `TraceRun` with token counts, model names, tool calls, and per-span results
 - **Zero dependencies** — everything defaults to in-memory, external systems are adapter-injected
 
 ## Quick Start
@@ -149,12 +150,47 @@ The audit log captures the full lifecycle of capability calls, including access 
 
 Export audit entries to external systems via `HttpAuditExporter` or implement your own `AuditExporter`.
 
+## Session Tracing
+
+Track a complete agent session — every capability call, every LLM invocation, token counts, and tool calls — as a single exportable `TraceRun`:
+
+```typescript
+import { AppChain, HttpTraceExporter } from 'agents-chain';
+
+const chain = await AppChain.create({
+  // ...
+  traceExporter: new HttpTraceExporter({
+    endpoint: 'https://gateway.melduo.com/traces',
+    apiKey: process.env.MELDUO_API_KEY,
+  }),
+});
+
+// Open a trace at session start
+const traceId = chain.openTrace();
+
+// Pass traceId into wrap() and openai()/anthropic() to group spans
+const secured = chain.wrap(myService, grants, traceId);
+const openai = chain.openai(new OpenAI({ apiKey: '...' }), traceId);
+
+await secured.sendEmail({ to: 'user@example.com', subject: 'Hello' });
+await openai.chat.completions.create({ model: 'gpt-4o', messages: [...] });
+
+// Close the trace — assembles the TraceRun and exports it
+const run = await chain.closeTrace(traceId, 'success');
+// run.summary.totalTokens   → 1240
+// run.summary.modelsUsed    → ["gpt-4o"]
+// run.spans                 → [{ capability, result, durationMs, modelMetadata }, ...]
+```
+
+For custom LLM providers (Google, Cohere, etc.), implement and register a `ModelMetadataExtractor`.
+
 ## Documentation
 
 | Section | Description |
 |---------|-------------|
 | [Getting Started](https://agent-chain.melduo.com/docs/getting-started) | Installation, quick start, how it works |
 | [Core Concepts](https://agent-chain.melduo.com/docs/concepts/host-and-agent) | Host & Agent, Capabilities, Grants, Verification, Audit |
+| [Tracing & Observability](https://agent-chain.melduo.com/docs/concepts/tracing) | Session traces, token counts, model extractors, exporters |
 | [Access Requests](https://agent-chain.melduo.com/docs/access-requests/overview) | Suspend/resume, approval scopes, security model |
 | [Examples](https://agent-chain.melduo.com/docs/examples/basic-service) | Basic service, SMS gateway, access request flow |
 | [API Reference](https://agent-chain.melduo.com/docs/api/appchain-config) | AppChainConfig, types, error codes |

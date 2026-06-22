@@ -29,6 +29,8 @@ export type AppInterceptContext = {
     approvalStore?: ApprovalStore;
     /** When true, return ConstraintAwareResult envelopes instead of raw results/errors. */
     constraintAware?: boolean;
+    /** Active trace ID — spans from this session are grouped under the trace run. */
+    traceId?: string;
 };
 
 export function wrapApp<T extends object>(
@@ -48,7 +50,7 @@ export function wrapApp<T extends object>(
             }
 
             const targetFn = typeof value === "function" ? (value as Function).bind(obj) : undefined;
-            return createInterceptedMethod(capability.name, ctx, targetFn);
+            return createInterceptedMethod(capability.name, ctx, targetFn, ctx.traceId);
         },
     }) as T;
 }
@@ -56,11 +58,12 @@ export function wrapApp<T extends object>(
 function createInterceptedMethod(
     capabilityName: string,
     ctx: AppInterceptContext,
-    targetFn?: (...args: unknown[]) => unknown
+    targetFn?: (...args: unknown[]) => unknown,
+    traceId?: string
 ): (...args: unknown[]) => Promise<unknown> {
     return async (...args: unknown[]) => {
         const callArgs = (args[0] ?? {}) as Record<string, unknown>;
-        return executeWithAccessRequest(capabilityName, callArgs, ctx, targetFn);
+        return executeWithAccessRequest(capabilityName, callArgs, ctx, targetFn, traceId);
     };
 }
 
@@ -73,7 +76,8 @@ async function executeWithAccessRequest(
     capabilityName: string,
     callArgs: Record<string, unknown>,
     ctx: AppInterceptContext,
-    targetFn?: (...args: unknown[]) => unknown
+    targetFn?: (...args: unknown[]) => unknown,
+    traceId?: string
 ): Promise<unknown> {
     let jti = "unknown";
     const authStart = Date.now();
@@ -137,7 +141,7 @@ async function executeWithAccessRequest(
                 durationMs: Date.now() - callStart,
                 errorMessage: execErr instanceof Error ? execErr.message : String(execErr),
                 authOverheadMs,
-            });
+            }, traceId);
             throw execErr;
         }
 
@@ -147,7 +151,7 @@ async function executeWithAccessRequest(
             result: "success",
             durationMs: Date.now() - callStart,
             authOverheadMs,
-        });
+        }, traceId);
 
         if (ctx.constraintAware) {
             return {
@@ -177,7 +181,7 @@ async function executeWithAccessRequest(
                     reason: `[constraint_aware] ${err.message}`,
                     jti,
                     authOverheadMs: Date.now() - authStart,
-                });
+                }, traceId);
 
                 const hasAccessRequests = !!ctx.accessRequestManager;
                 const guidance = hasAccessRequests
@@ -207,7 +211,7 @@ async function executeWithAccessRequest(
                         violatedValue
                     );
                     if (existingRule) {
-                        return executeWithAccessRequest(capabilityName, callArgs, ctx, targetFn);
+                        return executeWithAccessRequest(capabilityName, callArgs, ctx, targetFn, traceId);
                     }
                 }
 
@@ -221,7 +225,7 @@ async function executeWithAccessRequest(
                     reason: `[access_request] ${err.message}`,
                     jti,
                     authOverheadMs: Date.now() - authStart,
-                });
+                }, traceId);
 
                 const { request, waitForApproval } = await ctx.accessRequestManager.createRequest({
                     agentId: ctx.identity.agentId,
@@ -245,14 +249,14 @@ async function executeWithAccessRequest(
 
                     if (approvalResult.decision.scope === "call") {
                         const result = await executeWithAccessRequest(
-                            capabilityName, callArgs, ctx, targetFn
+                            capabilityName, callArgs, ctx, targetFn, traceId
                         );
                         ctx.approvalStore.revokeRule(rule.ruleId);
                         return result;
                     }
                 }
 
-                return executeWithAccessRequest(capabilityName, callArgs, ctx, targetFn);
+                return executeWithAccessRequest(capabilityName, callArgs, ctx, targetFn, traceId);
             }
 
             ctx.log.recordDenied({
@@ -265,7 +269,7 @@ async function executeWithAccessRequest(
                 reason: err.message,
                 jti,
                 authOverheadMs: Date.now() - authStart,
-            });
+            }, traceId);
             throw err;
         }
         throw err;

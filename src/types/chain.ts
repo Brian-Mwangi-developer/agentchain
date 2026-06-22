@@ -1,4 +1,5 @@
 import type { AuditExporter } from "../audit/audit-exporter.js";
+import type { TraceExporter } from "../audit/trace-exporter.js";
 import type { VerifierConfig } from "../auth/token-verifier.js";
 import type { JtiPersistenceAdapter } from "../memory/jti-cache.js";
 import type { AuditEntry } from "./audit.js";
@@ -29,6 +30,8 @@ export type AppChainConfig = {
     };
     jtiAdapter?: JtiPersistenceAdapter;
     auditExporter?: AuditExporter;
+    /** Default exporter for closeTrace(). Ship completed TraceRuns to the gateway. */
+    traceExporter?: TraceExporter;
     /** Resolve grants from DB/Redis instead of the grants passed to wrap(). */
     grantResolver?: VerifierConfig["grantResolver"];
     /** Enable agent access requests — agents can request permission for denied actions. */

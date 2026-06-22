@@ -38,6 +38,7 @@ const stats = chain.getStats();
 | `timestamp` | `number` | Unix ms |
 | `durationMs` | `number` | Execution time in ms |
 | `authOverheadMs` | `number` | Time spent in build + verify |
+| `modelMetadata` | `ModelMetadata?` | LLM metadata when the call went through an SDK wrapper (tokens, model, tool calls) |
 
 ## Argument Sanitization
 
@@ -108,6 +109,17 @@ const myExporter = {
   },
 };
 ```
+
+## Traces vs Audit Entries
+
+The audit log and the trace system share the same data source — every `recordCall()` / `recordDenied()` call writes to both. The difference is scope:
+
+- **Audit entries** — individual call records, persisted in the ring buffer, queryable with `getAuditLog()`
+- **Trace spans** — the same data, but grouped into a `TraceRun` that covers an entire agent session
+
+Open a trace with `chain.openTrace()` and pass the `traceId` to `wrap()` or `openai()`/`anthropic()`. All calls within that session automatically become spans on the open trace. `modelMetadata` (token counts, model name, tool calls) is attached to both the audit entry and the span when the call goes through an LLM SDK wrapper.
+
+See [Tracing & Observability](./tracing) for the full API.
 
 ## Internals
 
