@@ -125,8 +125,7 @@ See [Tracing & Observability](./tracing) for the full API.
 
 ```mermaid
 flowchart TD
-    A[recordCall / recordDenied] -->|O(1) push| B[In-memory buffer]
-    B -->|cap 1000, evict oldest| B
+    A[recordCall / recordDenied] -->|O1 push| B[In-memory buffer\ncapped at 1000 entries]
     C[getAuditLog] -->|read| B
     D[drain] -->|export + clear| B
     D -->|encrypt| E[(EncryptedStore)]
